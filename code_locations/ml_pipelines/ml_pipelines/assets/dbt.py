@@ -5,14 +5,19 @@ selects ONLY the ml_features path — elt_pipelines handles everything else.
 The asset graph still shows the full dependency chain across both code
 locations because Dagster stitches them together by AssetKey.
 
-The translator prefixes asset keys with the dbt layer folder so the
-UI groups look natural: ml_features/customer_rfm, etc.
+Daily-partitioned just like the elt layers. Passes --vars snapshot_dt
+into dbt so customer_rfm builds one row-set per partition.
 """
 
+import json
 import os
 from pathlib import Path
 
-from dagster import AssetExecutionContext, AssetKey, Backoff, Jitter, RetryPolicy
+from dagster import (
+    AssetExecutionContext,
+    AssetKey,
+    BackfillPolicy,
+)
 from dagster_dbt import (
     DagsterDbtTranslator,
     DagsterDbtTranslatorSettings,
@@ -21,17 +26,14 @@ from dagster_dbt import (
     dbt_assets,
 )
 
+from ml_pipelines.constants import (
+    DUCKDB_WRITER_TAGS,
+    TRANSIENT_LOCK_RETRY_POLICY,
+)
+from ml_pipelines.partitions import daily_partitions
+
 DBT_PROJECT_DIR = Path(os.environ.get("DBT_PROJECT_DIR", "/opt/dbt_project"))
 DBT_TARGET_PATH = Path(os.environ.get("DBT_TARGET_PATH", "/tmp/dbt_target"))
-
-# Retry policy for transient lock errors on macOS bind-mounted SQLite /
-# DuckDB (same trade-off as in elt_pipelines/constants.py).
-_TRANSIENT_LOCK_RETRY = RetryPolicy(
-    max_retries=2,
-    delay=2,
-    backoff=Backoff.EXPONENTIAL,
-    jitter=Jitter.PLUS_MINUS,
-)
 
 dbt_project = DbtProject(
     project_dir=DBT_PROJECT_DIR,
@@ -60,8 +62,6 @@ class MlDbtTranslator(DagsterDbtTranslator):
         return super().get_asset_key(dbt_resource_props)
 
     def get_group_name(self, dbt_resource_props):
-        # Same convention as elt_pipelines: seeds and sources get their
-        # own dedicated groups so they don't sit under `default` in the UI.
         if dbt_resource_props.get("resource_type") == "seed":
             return "seeds"
         if dbt_resource_props.get("resource_type") == "source":
@@ -78,8 +78,14 @@ translator = MlDbtTranslator(
     manifest=dbt_project.manifest_path,
     select="fqn:dbt_oss_template.ml_features.*",
     dagster_dbt_translator=translator,
-    op_tags={"dagster/concurrency_key": "duckdb_writer"},
-    retry_policy=_TRANSIENT_LOCK_RETRY,
+    partitions_def=daily_partitions,
+    backfill_policy=BackfillPolicy.multi_run(),
+    op_tags=DUCKDB_WRITER_TAGS,
+    retry_policy=TRANSIENT_LOCK_RETRY_POLICY,
 )
 def ml_features_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource):
-    yield from dbt.cli(["build"], context=context).stream()
+    time_window = context.partition_time_window
+    snapshot_dt = time_window.start.strftime("%Y-%m-%d")
+    vars_json = json.dumps({"snapshot_dt": snapshot_dt})
+    context.log.info(f"Running dbt build for partition {snapshot_dt}")
+    yield from dbt.cli(["build", "--vars", vars_json], context=context).stream()

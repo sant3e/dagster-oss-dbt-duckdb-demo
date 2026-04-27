@@ -13,6 +13,7 @@ from elt_pipelines.assets import (
     landing_products,
     landing_sales,
 )
+from elt_pipelines.freshness_checks import all_freshness_checks
 from elt_pipelines.jobs import all_jobs
 from elt_pipelines.resources import build_resources
 from elt_pipelines.sensors import daily_monthly_bridge_sensor, landing_file_sensor
@@ -24,7 +25,9 @@ defs = Definitions(
         landing_locations.raw_loc_a101,
         landing_products.raw_prd_info_monthly,
         dbt_assets_module.elt_dbt_assets,
+        dbt_assets_module.elt_dbt_seed_assets,
     ],
+    asset_checks=all_freshness_checks,
     jobs=all_jobs,
     sensors=[
         landing_file_sensor,
