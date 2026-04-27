@@ -23,7 +23,7 @@ from dagster_dbt import (
     dbt_assets,
 )
 
-from elt_pipelines.constants import DUCKDB_WRITER_TAGS
+from elt_pipelines.constants import DUCKDB_WRITER_TAGS, TRANSIENT_LOCK_RETRY_POLICY
 
 DBT_PROJECT_DIR = Path(os.environ.get("DBT_PROJECT_DIR", "/opt/dbt_project"))
 DBT_TARGET_PATH = Path(os.environ.get("DBT_TARGET_PATH", "/tmp/dbt_target"))
@@ -91,6 +91,7 @@ translator = EltDbtTranslator(
     exclude="fqn:dbt_oss_template.ml_features.*",
     dagster_dbt_translator=translator,
     op_tags=DUCKDB_WRITER_TAGS,
+    retry_policy=TRANSIENT_LOCK_RETRY_POLICY,
 )
 def elt_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource):
     yield from dbt.cli(["build"], context=context).stream()

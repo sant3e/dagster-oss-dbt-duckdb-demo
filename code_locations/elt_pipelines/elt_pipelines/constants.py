@@ -1,8 +1,21 @@
 """Static names and paths referenced across elt_pipelines."""
 
+from dagster import Backoff, Jitter, RetryPolicy
+
 # Tag key used for DuckDB-writer concurrency serialization (see dagster.yaml).
 DUCKDB_WRITER_CONCURRENCY_KEY = "duckdb_writer"
 DUCKDB_WRITER_TAGS = {"dagster/concurrency_key": DUCKDB_WRITER_CONCURRENCY_KEY}
+
+# Retry policy for assets that write to DuckDB and/or Dagster's SQLite
+# metadata store. Transient lock errors can happen on macOS bind mounts
+# (SQLite locking protocol) or if something holds the DuckDB file briefly.
+# 2 retries with exponential backoff + jitter is enough to ride out both.
+TRANSIENT_LOCK_RETRY_POLICY = RetryPolicy(
+    max_retries=2,
+    delay=2,            # base delay seconds
+    backoff=Backoff.EXPONENTIAL,
+    jitter=Jitter.PLUS_MINUS,
+)
 
 # DuckDB schemas used by landing assets (dbt also references these via source()).
 RAW_SCHEMA = "raw"

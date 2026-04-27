@@ -7,7 +7,14 @@ asset dependency: the upstream asset (`customer_rfm`) is declared in this
 same code location but depends on elt_pipelines' reporting layer.
 """
 
-from dagster import AssetExecutionContext, AssetKey, asset
+from dagster import (
+    AssetExecutionContext,
+    AssetKey,
+    Backoff,
+    Jitter,
+    RetryPolicy,
+    asset,
+)
 from dagster_duckdb import DuckDBResource
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
@@ -18,6 +25,13 @@ _SEGMENT_LABELS = {
     2: "Promising",
     3: "Champion",
 }
+
+_TRANSIENT_LOCK_RETRY = RetryPolicy(
+    max_retries=2,
+    delay=2,
+    backoff=Backoff.EXPONENTIAL,
+    jitter=Jitter.PLUS_MINUS,
+)
 
 
 @asset(
@@ -31,6 +45,7 @@ _SEGMENT_LABELS = {
     group_name="ml_segmentation",
     compute_kind="scikit-learn",
     op_tags={"dagster/concurrency_key": "duckdb_writer"},
+    retry_policy=_TRANSIENT_LOCK_RETRY,
 )
 def customer_segments(context: AssetExecutionContext, duckdb: DuckDBResource) -> None:
     with duckdb.get_connection() as conn:

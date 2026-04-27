@@ -13,12 +13,26 @@ import os
 from pathlib import Path
 
 import joblib
-from dagster import AssetExecutionContext, AssetKey, asset
+from dagster import (
+    AssetExecutionContext,
+    AssetKey,
+    Backoff,
+    Jitter,
+    RetryPolicy,
+    asset,
+)
 from dagster_duckdb import DuckDBResource
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 CHURN_RECENCY_THRESHOLD_DAYS = 90
+
+_TRANSIENT_LOCK_RETRY = RetryPolicy(
+    max_retries=2,
+    delay=2,
+    backoff=Backoff.EXPONENTIAL,
+    jitter=Jitter.PLUS_MINUS,
+)
 
 
 @asset(
@@ -33,6 +47,7 @@ CHURN_RECENCY_THRESHOLD_DAYS = 90
     group_name="ml_churn",
     compute_kind="scikit-learn",
     op_tags={"dagster/concurrency_key": "duckdb_writer"},
+    retry_policy=_TRANSIENT_LOCK_RETRY,
 )
 def churn_predictions(context: AssetExecutionContext, duckdb: DuckDBResource) -> None:
     with duckdb.get_connection() as conn:

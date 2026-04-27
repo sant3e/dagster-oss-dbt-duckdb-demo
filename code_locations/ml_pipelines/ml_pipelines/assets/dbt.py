@@ -12,7 +12,7 @@ UI groups look natural: ml_features/customer_rfm, etc.
 import os
 from pathlib import Path
 
-from dagster import AssetExecutionContext, AssetKey
+from dagster import AssetExecutionContext, AssetKey, Backoff, Jitter, RetryPolicy
 from dagster_dbt import (
     DagsterDbtTranslator,
     DagsterDbtTranslatorSettings,
@@ -23,6 +23,15 @@ from dagster_dbt import (
 
 DBT_PROJECT_DIR = Path(os.environ.get("DBT_PROJECT_DIR", "/opt/dbt_project"))
 DBT_TARGET_PATH = Path(os.environ.get("DBT_TARGET_PATH", "/tmp/dbt_target"))
+
+# Retry policy for transient lock errors on macOS bind-mounted SQLite /
+# DuckDB (same trade-off as in elt_pipelines/constants.py).
+_TRANSIENT_LOCK_RETRY = RetryPolicy(
+    max_retries=2,
+    delay=2,
+    backoff=Backoff.EXPONENTIAL,
+    jitter=Jitter.PLUS_MINUS,
+)
 
 dbt_project = DbtProject(
     project_dir=DBT_PROJECT_DIR,
@@ -70,6 +79,7 @@ translator = MlDbtTranslator(
     select="path:models/ml_features",
     dagster_dbt_translator=translator,
     op_tags={"dagster/concurrency_key": "duckdb_writer"},
+    retry_policy=_TRANSIENT_LOCK_RETRY,
 )
 def ml_features_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource):
     yield from dbt.cli(["build"], context=context).stream()

@@ -10,6 +10,7 @@ from elt_pipelines.constants import (
     DUCKDB_WRITER_TAGS,
     FILENAME_PREFIXES_DAILY,
     GROUP_LANDING,
+    TRANSIENT_LOCK_RETRY_POLICY,
 )
 from elt_pipelines.partitions import daily_partitions
 
@@ -25,6 +26,7 @@ from elt_pipelines.partitions import daily_partitions
     group_name=GROUP_LANDING,
     compute_kind="duckdb",
     op_tags=DUCKDB_WRITER_TAGS,
+    retry_policy=TRANSIENT_LOCK_RETRY_POLICY,
 )
 def raw_loc_a101(context: AssetExecutionContext, duckdb: DuckDBResource) -> None:
     landing_dir = os.environ.get("DATA_LANDING_DIR", "/data/landing")

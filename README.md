@@ -86,6 +86,8 @@ These populate `raw.sales_details`, `raw.cust_info`, `raw.loc_a101`, `raw.prd_in
 
 Turn on **`daily_monthly_bridge_sensor`**. It notices that all three daily upstreams are ready for `2026-04-01` AND the monthly upstream has been materialized for month-of(2026-04-01), so it fires the **`dbt_elt_job`** for that day. The dbt pipeline builds landing → staging → mart → reporting in DuckDB.
 
+While you're in the Automation tab, also confirm **`default_automation_condition_sensor`** is ON. It's Dagster's built-in sensor that drives the `AutomationCondition.eager()` rules on mart models — it's what lets the mart layer auto-refresh when staging updates (as opposed to only refreshing because an imperative sensor kicked a job). It's on by default in new Dagster deployments; in this docker-compose setup it starts OFF, so flip it on here.
+
 ### Step 4 — Drop event-day files to see the daily cadence in action
 
 The `future_landing_data/` folder is **empty by default** (it only ships with a README). You generate the event-style CSVs yourself using the Faker-based generator — this keeps the repo lean and lets you pick whatever dates you want for the demo.
