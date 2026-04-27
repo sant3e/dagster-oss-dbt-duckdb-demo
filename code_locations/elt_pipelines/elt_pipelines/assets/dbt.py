@@ -93,22 +93,23 @@ class EltDbtTranslator(DagsterDbtTranslator):
 
     def get_automation_condition(self, dbt_resource_props):
         """AutomationCondition.eager() for every partitioned non-seed model
-        EXCEPT those tagged `latest_available_source` / `latest_available`,
-        which are handled by `cross_partition_sensor` so they can fire
-        daily even when their slow-cadence upstream hasn't changed.
+        EXCEPT those tagged `latest_available` — those are fired by the
+        cross_partition_sensor in expansion mode, so they can materialize
+        daily even when their slow-cadence upstream hasn't updated.
+
+        Models tagged `latest_available_source` keep AC.eager() — the tag
+        just signals to the sensor "this asset is the dbt-side handle on
+        slow-cadence data." It should still fire normally via AC when its
+        OWN upstream updates (once a month for the monthly product data).
 
         Seeds themselves return None — they're not partitioned and
-        don't participate in the daily cascade. Running `dbt seed` or
-        invoking `dbt_seed_job` materializes them once; their downstream
-        landing wrapper (raw_erp_*) carries eager() like every other
-        partitioned asset, so the first `--vars snapshot_dt` run after
-        the seed materialization will re-read the seed and stamp it
-        onto that day's partition.
+        don't participate in the daily cascade. Materialize them via
+        `dbt_seed_job` (Step 1 of the demo); their downstream
+        `raw_erp_*` landing wrappers carry AC.eager() like every other
+        partitioned asset.
         """
         tags = dbt_resource_props.get("tags", []) or []
         if dbt_resource_props.get("resource_type") == "seed":
-            return None
-        if "latest_available_source" in tags:
             return None
         if "latest_available" in tags:
             return None

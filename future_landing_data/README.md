@@ -1,6 +1,6 @@
 # Future landing data
 
-Pre-generated **event-style** snapshot CSVs you can drop into `../data/landing/` to demo the sensors firing. Unlike the day-1 files in `data/landing/` (which are full-history initialization snapshots), these files contain **only the events that happened on the day they represent** — new orders placed, new customers signed up, countries changed, etc. Dagster's landing assets append them to DuckDB, and the dbt landing models dedup to the latest `snapshot_date` per business key.
+Pre-generated **event-style** snapshot CSVs you can drop into `../data/landing/` to demo the sensors firing. Unlike the day-1 files in `data/landing/` (which are full-history initialization snapshots), these files contain **only the events that happened on the day they represent** — new orders placed, new customers signed up, countries changed, etc. Dagster's landing assets append them to DuckDB partitioned per day.
 
 ## What's in here today
 
@@ -29,8 +29,50 @@ cp future_landing_data/*.csv data/landing/
 
 Then:
 - `landing_file_sensor` picks up each new CSV within ~30 s and kicks the matching partitioned landing asset (daily or monthly, automatically).
-- `daily_monthly_bridge_sensor` fires the ELT downstream for each day once its three daily upstreams are ready **and** its month's monthly upstream exists.
-- Example: if you copy April 2–5 + the May monthly, you'll get ELT runs for April 2–5. May days will stay idle until you also drop May daily files (which is exactly the "bridge" pattern the sensor exists to demonstrate).
+- `AutomationCondition.eager()` on the daily-source dbt models (`raw_crm_*`, `stg_crm_*`, `stg_erp_LOC_A101`, mart, reporting) auto-fires them per partition as the raw landings materialize.
+- `cross_partition_sensor` fires `mart/dim_products_history` for each new daily partition in expansion mode, reusing the latest monthly product snapshot whenever a newer one isn't available. May days drop into this cascade too: they'll materialize using April's monthly product data until you drop the May monthly file, at which point later May partitions switch to May's snapshot.
+
+## Regenerating / generating more days
+
+Prereq:
+```bash
+# Recommended — guarantees pip installs into the same interpreter
+# that `python3` resolves to (avoids the classic Homebrew situation
+# where `pip` and `python3` target different versions):
+python3 -m pip install --break-system-packages faker
+```
+
+The generator takes CLI arguments:
+
+```bash
+# A single day:
+python3 scripts/generate_future_landing_data.py --start 2026-04-02
+
+# A date range (inclusive both ends):
+python3 scripts/generate_future_landing_data.py --start 2026-04-02 --end 2026-04-10
+
+# N consecutive days from a start date:
+python3 scripts/generate_future_landing_data.py --start 2026-05-01 --days 5
+
+# Also emit a monthly prd_info file for each month the range touches:
+python3 scripts/generate_future_landing_data.py --start 2026-05-01 --days 5 --monthly
+
+# Reproducibility: any integer seed pins Faker + random identically:
+python3 scripts/generate_future_landing_data.py --start 2026-04-02 --seed 123
+```
+
+Output lands in `future_landing_data/` (this folder). Existing files with the same name are overwritten.
+
+**The generator is safe to run multiple times** — it scans any files already in this folder to continue customer IDs, product IDs, and sales-order numbers monotonically. Run it once for April, again for May, and the IDs will pick up where April left off rather than colliding.
+
+## Data guarantees
+
+- Sales are always positive: `sls_sales = sls_price × sls_quantity`, with `sls_price` picked from a realistic tier list and `sls_quantity` in `[1, 10]`.
+- Customer IDs are unique (new customers start at 30000, monotonic across invocations).
+- Product IDs are unique (new products start at 1000, monotonic across invocations).
+- Sales order numbers continue from `SO75124` upward.
+- Country changes never re-select the customer's current country.
+- Names come from Faker's `first_name()` / `last_name()` so you get realistic diversity rather than a handful of repeats.
 
 ## Regenerating / generating more days
 
