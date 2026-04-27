@@ -9,12 +9,24 @@ given run produces exactly one row-set per model for that partition.
 Seeds are NOT partitioned (they're static reference data), so they live
 in a SEPARATE @dbt_assets block without a partitions_def.
 
-The mart/reporting AutomationCondition.eager() hooks that the previous
-(unpartitioned) version had are deliberately removed: with a partitioned
-pipeline we drive downstream execution via the bridge sensor
-(daily_monthly_bridge_sensor) + the cross-code-location sensor
-(elt_to_ml_bridge_sensor), which is the pattern engineers expect in
-production.
+Every partitioned dbt model downstream of the daily-cadence landings
+carries `AutomationCondition.eager()` (applied via the translator's
+`get_automation_condition`). As soon as an upstream partition
+materializes, the corresponding downstream partition auto-fires —
+evaluated by Dagster's built-in `default_automation_condition_sensor`.
+
+Models tagged `latest_available_source` (slow-cadence projection onto
+the daily grid — e.g. `raw_crm_prd_info` reading the monthly product
+source) and `latest_available` (consumers of the projection — e.g.
+`stg_crm_prd_info`) are deliberately EXCLUDED from AutomationCondition.
+They're driven by `cross_partition_sensor` (ported from imp_finance_mart),
+which fires them daily in expansion mode, reusing the latest-available
+monthly snapshot until a new monthly snapshot arrives.
+
+ML assets in ml_pipelines also deliberately lack AutomationCondition —
+the `elt_to_ml_bridge_sensor` is the explicit on/off gate for the ml
+chain. Turn that sensor on to allow ml to train per partition; turn
+it off and the ml chain stops firing while elt keeps running.
 """
 
 import json
@@ -24,6 +36,7 @@ from pathlib import Path
 from dagster import (
     AssetExecutionContext,
     AssetKey,
+    AutomationCondition,
     BackfillPolicy,
 )
 from dagster_dbt import (
@@ -58,10 +71,19 @@ def _layer_from_path(original_file_path: str) -> str | None:
     return None
 
 
+# Models that are part of the seed chain (unpartitioned, no automation).
+_SEED_CHAIN_MODEL_NAMES = {
+    "raw_erp_CUST_AZ12",
+    "raw_erp_PX_CAT_G1V2",
+    "stg_erp_CUST_AZ12",
+    "stg_erp_PX_CAT_G1V2",
+}
+
+
 class EltDbtTranslator(DagsterDbtTranslator):
-    """Prefix asset keys with their dbt layer folder and assign sensible
-    group names to seeds + sources. No AutomationCondition — the
-    partitioned pipeline is driven by sensors.
+    """Prefix asset keys with their dbt layer folder, assign sensible
+    group names to seeds + sources, and attach AutomationCondition.eager()
+    to every partitioned model so downstream hops auto-cascade.
     """
 
     def get_asset_key(self, dbt_resource_props) -> AssetKey:
@@ -79,6 +101,32 @@ class EltDbtTranslator(DagsterDbtTranslator):
         if dbt_resource_props.get("resource_type") == "source":
             return "sources"
         return super().get_group_name(dbt_resource_props)
+
+    def get_automation_condition(self, dbt_resource_props):
+        """AutomationCondition.eager() attached to every partitioned model
+        EXCEPT the ones whose parent is `latest_available_source` and those
+        that have `latest_available` themselves. Those are driven by the
+        `cross_partition_sensor` so they can fire daily even when the
+        monthly upstream hasn't changed.
+
+        NOT attached to:
+        - seeds + seed-chain wrappers (unpartitioned static reference data).
+        - models tagged `latest_available_source` — they're "projection" models
+          that adapt a slow-cadence source onto the daily snapshot grid.
+          Their behavior is tied to the sensor, not eager().
+        - models tagged `latest_available` — explicitly sensor-gated by the
+          tag-driven expansion sensor.
+        """
+        tags = dbt_resource_props.get("tags", []) or []
+        if dbt_resource_props.get("resource_type") == "seed":
+            return None
+        if dbt_resource_props.get("name") in _SEED_CHAIN_MODEL_NAMES:
+            return None
+        if "latest_available_source" in tags:
+            return None
+        if "latest_available" in tags:
+            return None
+        return AutomationCondition.eager()
 
 
 translator = EltDbtTranslator(

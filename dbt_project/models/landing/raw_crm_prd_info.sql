@@ -3,6 +3,7 @@
         materialized='incremental',
         unique_key='snapshot_date',
         incremental_strategy='delete+insert',
+        tags=['latest_available_source'],
     )
 }}
 
@@ -11,6 +12,10 @@
 -- whose snapshot_month is on-or-before the partition date. This is the
 -- standard latest-available-on-or-before pattern used to join a slow-moving
 -- reference into a daily-running pipeline.
+--
+-- Tagged `latest_available_source` so the cross_partition_sensor knows
+-- downstream daily models should expand against this one even when its
+-- underlying raw source only updates monthly.
 --
 -- Emits `snapshot_date = '{{ var("snapshot_dt") }}'::DATE` so downstream
 -- staging/mart can uniformly filter all tables by the daily partition key.

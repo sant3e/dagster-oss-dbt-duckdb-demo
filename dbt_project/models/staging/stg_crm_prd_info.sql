@@ -3,6 +3,7 @@
         materialized='incremental',
         unique_key='snapshot_date',
         incremental_strategy='delete+insert',
+        tags=['latest_available'],
     )
 }}
 
@@ -10,6 +11,11 @@
 -- monthly snapshot on-or-before the daily partition and emits
 -- snapshot_date = the daily partition. We filter to that snapshot_date
 -- and derive an SCD-style prd_end_dt via LEAD() within the snapshot.
+--
+-- Tagged `latest_available` because its upstream (raw_crm_prd_info) is
+-- tagged `latest_available_source` — the cross_partition_sensor fires
+-- this model daily even when the underlying monthly source hasn't
+-- updated, using the latest monthly partition as the reference data.
 SELECT
     prd_id AS prd_id,
     REPLACE(SUBSTRING(prd_key, 1, 5), '-', '_') AS cat_id,

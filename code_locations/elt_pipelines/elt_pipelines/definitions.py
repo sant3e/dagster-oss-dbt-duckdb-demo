@@ -16,7 +16,7 @@ from elt_pipelines.assets import (
 from elt_pipelines.freshness_checks import all_freshness_checks
 from elt_pipelines.jobs import all_jobs
 from elt_pipelines.resources import build_resources
-from elt_pipelines.sensors import daily_monthly_bridge_sensor, landing_file_sensor
+from elt_pipelines.sensors import cross_partition_sensor, landing_file_sensor
 
 defs = Definitions(
     assets=[
@@ -31,7 +31,7 @@ defs = Definitions(
     jobs=all_jobs,
     sensors=[
         landing_file_sensor,
-        daily_monthly_bridge_sensor,
+        cross_partition_sensor,
     ],
     resources=build_resources(),
 )
