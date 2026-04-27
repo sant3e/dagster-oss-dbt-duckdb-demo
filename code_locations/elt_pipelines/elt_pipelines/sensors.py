@@ -413,12 +413,98 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
     run_requests: List[RunRequest] = []
 
     latest_available_assets = find_assets_with_tag(manifest, "latest_available")
-    if not latest_available_assets:
+    latest_available_source_assets = find_assets_with_tag(manifest, "latest_available_source")
+
+    if not latest_available_assets and not latest_available_source_assets:
         return SensorResult(
-            skip_reason=SkipReason("No dbt models tagged `latest_available`."),
+            skip_reason=SkipReason(
+                "No dbt models tagged `latest_available` or `latest_available_source`."
+            ),
             cursor=_build_new_cursor({}, prev_cursor),
         )
 
+    # ---- Pass 1: latest_available_source assets ----
+    # These are the slow-cadence staging models whose upstream is a monthly
+    # (or irregular) source but whose partition def is daily. AC would fan
+    # them out across the entire month every time the monthly source lands
+    # (because Dagster's default partition mapping says "one monthly parent
+    # satisfies every daily child"). Instead we fire them here, one partition
+    # per day for which the monthly upstream has a latest-available-on-or-
+    # before partition, rate-limited to EXPANSION_PARTITION_LIMIT most recent
+    # days.
+    for asset_info in latest_available_source_assets:
+        asset_name = asset_info["name"]
+        node_id = asset_info["node_id"]
+
+        # For `latest_available_source`, the model's DIRECT deps are the
+        # monthly/irregular upstream(s). Collect their materialized partitions.
+        node = manifest["nodes"][node_id]
+        source_partitions: List[str] = []
+        for dep_id in node.get("depends_on", {}).get("nodes", []):
+            dep_node = _get_node_or_source(manifest, dep_id)
+            if dep_node is None:
+                continue
+            dep_key = _asset_key_from_dbt_node(manifest, dep_id)
+            try:
+                dep_parts = list(
+                    context.instance.get_materialized_partitions(dep_key) or []
+                )
+            except Exception as e:
+                context.log.warning(f"Could not load partitions for {dep_key}: {e}")
+                dep_parts = []
+            source_partitions.extend(dep_parts)
+
+        # The source partitions for a monthly source are month-start dates
+        # like "2026-04-01". We expand that to daily keys "2026-04-01" ..
+        # yesterday (UTC) because the STG is daily-partitioned.
+        source_partitions = sorted(set(source_partitions))
+        if not source_partitions:
+            context.log.info(
+                f"Pass-1 source {asset_name}: no upstream partitions yet; waiting"
+            )
+            continue
+
+        base_range = generate_expansion_date_range(source_partitions)
+        target_limited = get_latest_partitions_only(
+            base_range, limit=EXPANSION_PARTITION_LIMIT
+        )
+        context.log.info(
+            f"Pass-1 source {asset_name}: upstream partitions {source_partitions}, "
+            f"expansion range {len(target_limited)} days"
+        )
+
+        asset_key = _asset_key_from_dbt_node(manifest, node_id)
+        try:
+            already_materialized = set(
+                context.instance.get_materialized_partitions(asset_key) or []
+            )
+        except Exception:
+            already_materialized = set()
+
+        for partition in target_limited:
+            # Must have SOME monthly/irregular parent partition <= this day.
+            if not find_latest_available_partition(source_partitions, partition):
+                continue
+            if _was_recently_triggered(prev_cursor, asset_name, partition):
+                continue
+            if partition in already_materialized:
+                continue
+            run_requests.append(
+                RunRequest(
+                    run_key=f"cxp-src-{asset_name}-{partition}",
+                    asset_selection=[asset_key],
+                    partition_key=partition,
+                    tags={
+                        "triggered_by": "cross_partition_sensor",
+                        "reason": "latest_available_source_expansion",
+                        "expansion_mode": "monthly_to_daily",
+                        "latest_available_source_asset": asset_name,
+                    },
+                )
+            )
+            cursor_triggered.setdefault(asset_name, []).append(partition)
+
+    # ---- Pass 2: latest_available assets (downstream marts) ----
     # Daily downstreams materialize via dbt_elt_landing_job (which targets
     # the landing dbt models). Expansion fires one partition_key per day.
     # Because the partitioned landing job has a fixed asset selection, we
