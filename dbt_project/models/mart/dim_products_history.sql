@@ -3,13 +3,18 @@
         materialized='incremental',
         unique_key='snapshot_date',
         incremental_strategy='delete+insert',
+        tags=['latest_available'],
     )
 }}
 
--- Historical products (SCD-style with prd_end_dt derived via LEAD upstream),
--- filtered to the current partition. stg_erp_PX_CAT_G1V2 is now
--- daily-partitioned (the seed is stamped onto the daily grid in the
--- landing model), so we co-filter on snapshot_date like every other join.
+-- Historical products (SCD-style), filtered to the current partition.
+-- This is the first mart that bridges the monthly product cadence into
+-- the daily pipeline — its direct upstream `stg_crm_prd_info` is tagged
+-- `latest_available_source` (slow-cadence). Tagged `latest_available`
+-- so `cross_partition_sensor` fires it daily in expansion mode, reusing
+-- the latest monthly `stg_crm_prd_info` snapshot until a newer one
+-- arrives. Downstream marts / reporting consume this daily view via
+-- normal AutomationCondition.eager() — they don't need the tag.
 SELECT
     ROW_NUMBER() OVER (ORDER BY pn.prd_start_dt, pn.prd_key) AS product_key,
     pn.prd_id AS product_id,

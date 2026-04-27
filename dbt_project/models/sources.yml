@@ -41,7 +41,6 @@ sources:
           MONTHLY-snapshotted CRM product master. A single row-set per month
           (snapshot_month = YYYY-MM-01). Downstream models join daily facts to
           whichever snapshot_month is "currently in effect" for that day.
-        tags: ['latest_available_source']
         columns:
           - name: snapshot_month
             description: "First-of-month date indicating which month this row belongs to"
