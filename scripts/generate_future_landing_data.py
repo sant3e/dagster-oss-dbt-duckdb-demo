@@ -292,7 +292,15 @@ def build_day_sales_event(
     for _ in range(n_orders):
         so = f"SO{next_order_number}"
         next_order_number += 1
-        prd_key = rng.choice(valid_prd_keys)
+        # prd_info.prd_key is in 5-segment form ("BI-RB-BK-R50R-58"). The
+        # downstream staging model `stg_crm_prd_info` does
+        # `REPLACE(SUBSTRING(prd_key, 7), '-', '_')` to produce the
+        # 3-segment product_number ("BK_R50R_58") that `dim_products`
+        # holds. `sales_details.sls_prd_key` must be in the *same
+        # 3-segment form* (with dashes) so that staging and the mart join
+        # line up. The day-1 template uses this form ("BK-R93R-62") too.
+        full_prd_key = rng.choice(valid_prd_keys)
+        prd_key = full_prd_key[6:] if len(full_prd_key) > 6 else full_prd_key
         cust_id = rng.choice(sorted(existing_customer_ids))
         qty = rng.randint(*QUANTITY_RANGE)
         price = rng.choice(PRICE_TIERS)
