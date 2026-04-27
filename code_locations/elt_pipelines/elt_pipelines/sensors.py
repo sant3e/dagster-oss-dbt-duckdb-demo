@@ -134,7 +134,7 @@ def landing_file_sensor(context: SensorEvaluationContext) -> SensorResult:
                 asset_selection=[asset_key],
                 job_name=job_name,
                 tags={
-                    "trigger/source": "landing_file_sensor",
+                    "triggered_by": "landing_file_sensor",
                     "landing/file": entry.name,
                 },
             )

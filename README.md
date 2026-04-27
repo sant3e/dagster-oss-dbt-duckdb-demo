@@ -86,11 +86,11 @@ These populate `raw.sales_details`, `raw.cust_info`, `raw.loc_a101`, `raw.prd_in
 
 ### Step 3 — Watch the cascade self-propagate via AutomationCondition + the cross-partition sensor
 
-Turn on Dagster's built-in **`default_automation_condition_sensor`** (Automation → Sensors). This sensor evaluates `AutomationCondition.eager()` rules (which are attached to every partitioned asset downstream of landing except the one tagged `latest_available`, `dim_products_history` — that's sensor-gated) AND evaluates the `FreshnessPolicy` on every asset, surfacing PASS / WARN / FAIL on each asset's **Checks** tab automatically.
+Turn on **`elt_automation_condition_sensor`** (in the `elt_pipelines` code location) and **`ml_automation_condition_sensor`** (in `ml_pipelines`). These are custom `AutomationConditionSensorDefinition`s that replace Dagster's built-in `default_automation_condition_sensor`. The critical thing they add is `run_tags={"dagster/concurrency_key": "duckdb_writer"}` on every run they emit — without that, the implicit `__ASSET_JOB` runs fire in parallel and race on the DuckDB file lock.
 
-Turn on **`cross_partition_sensor`** too. This is a tag-driven sensor ported from [`imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`]. It reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source` dbt model) and fires one RunRequest per day in expansion mode — so the mart keeps materializing daily even while the underlying monthly source hasn't updated, reusing the latest monthly snapshot until a newer one arrives.
+Turn on **`cross_partition_sensor`** too. Tag-driven sensor ported from `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. It reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source`) and fires one RunRequest per day in expansion mode — so the mart keeps materializing daily even while the underlying monthly source hasn't updated, reusing the latest monthly snapshot until a newer one arrives.
 
-No separate freshness sensor to toggle on — freshness is metadata on the assets themselves (via `FreshnessPolicy`) and gets evaluated automatically.
+With those three sensors on (plus `landing_file_sensor` from Step 2), partition `2026-04-01` should cascade end-to-end within ~90 seconds: landing dbt → staging → mart → reporting via AC, plus `dim_products_history` via the cross-partition sensor.
 
 With both sensors on, partition `2026-04-01` cascades automatically end-to-end:
 - `raw/*` landings already materialized (Step 2).

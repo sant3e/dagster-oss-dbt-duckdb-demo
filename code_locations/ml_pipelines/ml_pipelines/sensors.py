@@ -78,7 +78,7 @@ def elt_to_ml_bridge_sensor(context: SensorEvaluationContext) -> SensorResult:
                 run_key=f"ml-training-{partition_key}-{r.storage_id}",
                 partition_key=partition_key,
                 tags={
-                    "trigger/source": "elt_to_ml_bridge_sensor",
+                    "triggered_by": "elt_to_ml_bridge_sensor",
                     "trigger/upstream_event_id": str(r.storage_id),
                 },
             )
