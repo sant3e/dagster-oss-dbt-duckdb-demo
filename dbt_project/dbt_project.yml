@@ -18,9 +18,9 @@ clean-targets:
 
 # Seeds: only static reference tables are seeded via `dbt seed`.
 # The daily-snapshotted tables (sales_details, cust_info, LOC_A101) are
-# shipped as files in data/landing/ and ingested by Dagster's partitioned
-# landing assets, NOT by dbt. Day 1 (2026-04-01) comes from the original
-# sant3e CSVs which we've already converted.
+# shipped as template files in data/landing/ and ingested by Dagster's
+# partitioned landing assets, NOT by dbt. Each demo session starts by
+# running ./scripts/rebase_day1_csvs.sh to stamp day-1 at today-3.
 seeds:
   +enabled: true
   +schema: seeds

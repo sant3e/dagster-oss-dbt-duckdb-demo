@@ -118,7 +118,7 @@ class EltDbtTranslator(DagsterDbtTranslator):
                                    & ~in_progress() & ~any_deps_missing()
                                    & ~any_deps_in_progress()
         * `eager_with_lookback`  = eager().without(in_latest_time_window())
-                                   & in_latest_time_window(lookback_delta=365d)
+                                   & in_latest_time_window(lookback_delta=7d)
 
         Seeds   → `new_seed_added | code_version_change`
         Models  → `code_version_change | eager_with_lookback`
@@ -135,14 +135,17 @@ class EltDbtTranslator(DagsterDbtTranslator):
         (imp_v2, fpa) the sensor is always running and the cold-start
         case never appears; in this demo you have to **prime the cascade
         once** by manually materializing the 6 staging assets for the
-        landed partition (2026-04-01) before the AC sensor takes over.
+        landed day-1 partition before the AC sensor takes over.
         See README Step 3 for the bootstrap instructions.
 
-        `in_latest_time_window(lookback_delta=timedelta(days=365))` widens
-        the eager_with_lookback branch to the past year so historical
-        demo partitions qualify. **This window is calibrated for day-1
-        = 2026-04-01 and expires on 2027-04-27**; see the Troubleshooting
-        section in README.md for how to extend it.
+        `in_latest_time_window(lookback_delta=timedelta(days=7))` widens
+        the eager_with_lookback branch to the past week. This is calibrated
+        for the demo workflow where `scripts/rebase_day1_csvs.sh` anchors
+        day-1 at (today - 3) and the Faker generator adds (today - 2) and
+        (today - 1) — all three partitions fall inside the 7-day window.
+        Enlarge it if you want older historical partitions to qualify for
+        eager auto-materialization; narrow it if you only want very recent
+        days to cascade.
 
         Seeds and `latest_available` assets return None in this code
         path: seeds are unpartitioned and materialized once via
@@ -185,9 +188,9 @@ class EltDbtTranslator(DagsterDbtTranslator):
                 AutomationCondition.in_latest_time_window()
             )
             & AutomationCondition.in_latest_time_window(
-                lookback_delta=timedelta(days=365)
+                lookback_delta=timedelta(days=7)
             )
-        ).with_label("eager (365d lookback)")
+        ).with_label("eager (7d lookback)")
 
         # (Seed branch unreachable because seeds return None above, but
         # we keep it so the rule mirrors the reference and survives a
