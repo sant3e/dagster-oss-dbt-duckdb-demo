@@ -453,17 +453,6 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
             context.log.info(f"  no source partitions; waiting")
             continue
 
-        # Build the date range and limit to the N most recent days.
-        target_range = generate_expansion_date_range(all_source_partitions)
-        target_limited = get_latest_partitions_only(
-            target_range, limit=EXPANSION_PARTITION_LIMIT
-        )
-        context.log.info(
-            f"  expansion range: {len(target_limited)} days "
-            f"({target_limited[0] if target_limited else 'none'} … "
-            f"{target_limited[-1] if target_limited else 'none'})"
-        )
-
         # Pre-fetch partitions for exact-match deps once (avoid re-fetching per day).
         exact_dep_partitions: Dict[str, set] = {}
         for dep_name, dep_key in deps["exact_match"]:
@@ -478,6 +467,50 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
                 f"{sorted(exact_dep_partitions[dep_name])[:10]}"
                 f"{'...' if len(exact_dep_partitions[dep_name]) > 10 else ''}"
             )
+
+        # Build the candidate date range.
+        #
+        # When the asset has EXACT_MATCH deps (e.g. dim_products_history
+        # depends on daily stg_erp_PX_CAT_G1V2 AND monthly stg_crm_prd_info),
+        # we can only fire partitions where ALL exact deps are materialized.
+        # Take the intersection of exact-dep partitions and pick the N
+        # most-recent — otherwise `generate_expansion_date_range` would
+        # give us "the last 7 calendar days" which may not have any data
+        # upstream yet.
+        #
+        # When there are NO exact_match deps (pure-latest_available case,
+        # like imp_finance_mart's dim_mec_calendar), fall back to the
+        # reference project's original "earliest-source-partition ..
+        # yesterday" calendar range.
+        if deps["exact_match"]:
+            common_exact_partitions: Optional[set] = None
+            for dep_name in exact_dep_partitions:
+                dep_parts = exact_dep_partitions[dep_name]
+                common_exact_partitions = (
+                    dep_parts
+                    if common_exact_partitions is None
+                    else common_exact_partitions & dep_parts
+                )
+            base_range = sorted(common_exact_partitions or [])
+            context.log.info(
+                f"  candidate range (intersection of exact deps): "
+                f"{len(base_range)} days"
+            )
+        else:
+            base_range = generate_expansion_date_range(all_source_partitions)
+            context.log.info(
+                f"  candidate range (calendar, earliest-source → yesterday): "
+                f"{len(base_range)} days"
+            )
+
+        target_limited = get_latest_partitions_only(
+            base_range, limit=EXPANSION_PARTITION_LIMIT
+        )
+        context.log.info(
+            f"  expansion range: {len(target_limited)} days "
+            f"({target_limited[0] if target_limited else 'none'} … "
+            f"{target_limited[-1] if target_limited else 'none'})"
+        )
 
         # Pre-fetch asset's own materialized partitions.
         asset_key = _asset_key_from_dbt_node(manifest, node_id)
