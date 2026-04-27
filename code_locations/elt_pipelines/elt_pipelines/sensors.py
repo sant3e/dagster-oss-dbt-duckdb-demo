@@ -204,6 +204,7 @@ def daily_monthly_bridge_sensor(context: SensorEvaluationContext):
     days_ready_on_daily_side = set.intersection(*per_asset_partitions)
 
     run_requests: list[RunRequest] = []
+    newly_ready_days: list[str] = []
     for day in sorted(days_ready_on_daily_side):
         if day in already_fired:
             continue
@@ -215,17 +216,24 @@ def daily_monthly_bridge_sensor(context: SensorEvaluationContext):
                 f"been materialized yet. Waiting."
             )
             continue
+        newly_ready_days.append(day)
+        already_fired.add(day)
+
+    # Collapse N newly-ready days into ONE ELT run. dbt_elt_job is
+    # unpartitioned and rebuilds the whole pipeline from the current state
+    # of raw.* tables, so firing it once picks up all new days at once.
+    # Firing N times would just do the same work N times.
+    if newly_ready_days:
         run_requests.append(
             RunRequest(
-                run_key=f"elt-bridge-{day}",
+                run_key="elt-bridge-" + ",".join(newly_ready_days),
                 tags={
                     "trigger/source": "daily_monthly_bridge_sensor",
-                    "triggered_for_partition": day,
-                    "monthly_bridge/month": month_needed,
+                    "triggered_for_days": ",".join(newly_ready_days),
+                    "triggered_day_count": str(len(newly_ready_days)),
                 },
             )
         )
-        already_fired.add(day)
 
     new_cursor = json.dumps(sorted(already_fired))
     if not run_requests:
