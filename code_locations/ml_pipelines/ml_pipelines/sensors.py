@@ -55,7 +55,7 @@ def ml_features_updated_sensor(context: SensorEvaluationContext) -> SensorResult
             EventRecordsFilter(
                 event_type=DagsterEventType.ASSET_MATERIALIZATION,
                 asset_key=key,
-                after_storage_id=last_seen_id,
+                after_cursor=last_seen_id if last_seen_id else None,
             ),
             limit=50,
             ascending=True,
