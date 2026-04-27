@@ -222,12 +222,22 @@ LIMIT 15;
 
 ## Sensor vs AutomationCondition — why both?
 
-They target *different* asset hops in the graph so they don't fight each other:
+The project intentionally demos **both** approaches to trigger downstream work, across three different hops in the graph. Each hop uses whichever mechanism best illustrates a teaching point:
 
-- **`daily_monthly_bridge_sensor`** drives the **ELT dbt job** only when all daily upstreams AND the month-of(D) monthly upstream are ready for the same day D. It's explicit, cursor-based, easy to debug, and expresses a constraint auto-materialize cannot.
-- **`AutomationCondition.eager()`** on mart models drives the **staging → mart** hop automatically whenever staging updates. Declarative, less code, but harder to reason about for newcomers.
+| Hop | Mechanism | Why |
+|---|---|---|
+| staging → mart (elt) | `AutomationCondition.eager()` on mart dbt models | Declarative, built into the dbt translator. The default choice when you just want "refresh when upstreams change." |
+| (daily landing + monthly landing) → ELT job | `daily_monthly_bridge_sensor` (imperative sensor) | Needed for cadence-bridging — `AutomationCondition` can't express "wait for one partition of the daily asset AND the corresponding month of the monthly asset." |
+| elt reporting → ml training (cross-code-location) | `customer_rfm_updated_sensor` (imperative sensor) | Showcases **cross-code-location event triggers** — one location's sensor reacting to another's materializations. |
 
-Use the contrast as a teaching moment: sensors win when you need to express "wait until X and Y are ready for different partition cadences"; AutomationCondition wins for the 80% of "refresh this when upstreams change" cases.
+### "Wouldn't AutomationCondition alone do it?"
+
+Yes, mostly. In modern Dagster (1.12+) `AutomationCondition.eager()` stitches across code locations and **would** auto-fire the ML assets whenever their upstreams in `elt_pipelines` update. We deliberately did **not** put it on the ML assets — the sensor is there to demonstrate the sensor pattern. If you prefer a pure-declarative setup, you can delete `customer_rfm_updated_sensor` and add `AutomationCondition.eager()` to `customer_rfm`, `customer_segments`, and `churn_predictions` instead. Both approaches are valid.
+
+### Rules of thumb
+
+- **Use `AutomationCondition.eager()`** for the 80% case: "refresh this when its upstreams change."
+- **Use an imperative `@sensor`** when you need something `AutomationCondition` can't express — different partition cadences, external triggers (files, webhooks, APIs), or when you want very explicit cursor-based control.
 
 ---
 
