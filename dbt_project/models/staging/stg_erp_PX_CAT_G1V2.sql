@@ -1,0 +1,7 @@
+SELECT
+    ID AS ID,
+    TRIM(CAT) AS CAT,
+    TRIM(SUBCAT) AS SUBCAT,
+    TRIM(MAINTENANCE) AS MAINTENANCE,
+    CURRENT_TIMESTAMP AS dwh_create_date
+FROM {{ ref('raw_erp_PX_CAT_G1V2') }}

@@ -1,0 +1,31 @@
+version: 2
+
+models:
+  - name: stg_crm_cust_info
+    description: "Cleaned customer master; deduped on cst_id, latest record wins"
+    columns:
+      - name: cst_id
+        # Upstream has a handful of nulls; kept as warn for demo purposes.
+        tests:
+          - unique:
+              severity: warn
+          - not_null:
+              severity: warn
+      - name: cst_key
+        tests: [not_null]
+  - name: stg_crm_prd_info
+    description: "Cleaned product master with SCD-style prd_end_dt derived via LEAD"
+    columns:
+      - name: prd_id
+        tests: [not_null]
+  - name: stg_crm_sales_details
+    description: "Cleaned sales with integer dates converted to real DATE, prices/quantities corrected"
+    columns:
+      - name: sls_ord_num
+        tests: [not_null]
+  - name: stg_erp_CUST_AZ12
+    description: "Cleaned ERP customer reference with trimmed CID and normalized gender"
+  - name: stg_erp_LOC_A101
+    description: "Cleaned ERP location data with normalized country names"
+  - name: stg_erp_PX_CAT_G1V2
+    description: "Trimmed category taxonomy"

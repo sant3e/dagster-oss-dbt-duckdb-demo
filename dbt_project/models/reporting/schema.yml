@@ -1,0 +1,13 @@
+version: 2
+
+models:
+  - name: rpt_sales_summary_by_customer
+    description: "Per-customer sales aggregates used by ml_pipelines for RFM features"
+    columns:
+      - name: customer_key
+        tests: [not_null]
+  - name: rpt_sales_performance_by_product
+    description: "Per-product sales performance and profit"
+    columns:
+      - name: product_key
+        tests: [not_null]

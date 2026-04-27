@@ -1,0 +1,24 @@
+version: 2
+
+seeds:
+  - name: CUST_AZ12
+    description: "Static customer reference data from ERP system"
+    columns:
+      - name: CID
+        description: "Customer ID"
+      - name: BDATE
+        description: "Birth date"
+      - name: GEN
+        description: "Gender"
+
+  - name: PX_CAT_G1V2
+    description: "Static product category taxonomy from ERP system"
+    columns:
+      - name: ID
+        description: "Category ID"
+      - name: CAT
+        description: "Category"
+      - name: SUBCAT
+        description: "Subcategory"
+      - name: MAINTENANCE
+        description: "Maintenance flag"

@@ -1,0 +1,19 @@
+"""Top-level Definitions for the ml_pipelines code location."""
+
+from dagster import Definitions
+
+from ml_pipelines.assets import churn, dbt as dbt_assets_module, segmentation
+from ml_pipelines.jobs import all_jobs
+from ml_pipelines.resources import build_resources
+from ml_pipelines.sensors import customer_rfm_updated_sensor
+
+defs = Definitions(
+    assets=[
+        dbt_assets_module.ml_features_dbt_assets,
+        segmentation.customer_segments,
+        churn.churn_predictions,
+    ],
+    jobs=all_jobs,
+    sensors=[customer_rfm_updated_sensor],
+    resources=build_resources(),
+)

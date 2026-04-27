@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: dim_customers
+    description: "Customer dimension (CRM + ERP merged, standardized)"
+    columns:
+      - name: customer_key
+        tests: [unique, not_null]
+      - name: customer_id
+        # Inherits nulls from upstream (real sant3e data has a few missing cst_ids).
+        tests:
+          - not_null:
+              severity: warn
+  - name: dim_products_history
+    description: "Product dimension — full SCD history"
+    columns:
+      - name: product_key
+        tests: [unique, not_null]
+  - name: dim_products
+    description: "Current-products-only view of dim_products_history"
+    columns:
+      - name: product_number
+        tests: [unique, not_null]
+  - name: fct_sales
+    description: "Sales fact table"
+    columns:
+      - name: order_number
+        tests: [not_null]

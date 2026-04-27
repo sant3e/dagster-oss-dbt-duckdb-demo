@@ -1,0 +1,60 @@
+name: 'dbt_oss_template'
+version: '1.0.0'
+config-version: 2
+
+profile: 'dbt_oss_template'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Seeds: only static reference tables are seeded via `dbt seed`.
+# The daily-snapshotted tables (sales_details, cust_info, LOC_A101) are
+# shipped as files in data/landing/ and ingested by Dagster's partitioned
+# landing assets, NOT by dbt. Day 1 (2026-04-01) comes from the original
+# sant3e CSVs which we've already converted.
+seeds:
+  +enabled: true
+  +schema: seeds
+  +tags:
+    - source
+    - seeds
+
+snapshots:
+  +enabled: false
+
+models:
+  dbt_oss_template:
+    landing:
+      +schema: landing
+      +materialized: table
+      +group: elt_team
+      +access: private
+    staging:
+      +schema: staging
+      +materialized: table
+      +group: elt_team
+      +access: private
+    mart:
+      +schema: mart
+      +materialized: table
+      +group: elt_team
+      +access: public
+    reporting:
+      +schema: reporting
+      +materialized: view
+      +group: elt_team
+      +access: public
+    ml_features:
+      +schema: ml_features
+      +materialized: table
+      +group: ml_team
+      +access: public

@@ -1,0 +1,51 @@
+version: 2
+
+# Dagster-managed raw tables in DuckDB. These are populated by the partitioned
+# landing assets in elt_pipelines, NOT by dbt. dbt models in the landing layer
+# reference these via {{ source('dagster_raw', ...) }}.
+sources:
+  - name: dagster_raw
+    description: "Raw tables populated by Dagster's partitioned landing assets"
+    schema: raw
+    tables:
+      - name: sales_details
+        description: "Daily-snapshotted sales transactions from CRM (unioned across partitions)"
+        columns:
+          - name: snapshot_date
+            description: "Date the snapshot was captured (from the CSV filename)"
+            tests:
+              - not_null
+          - name: sls_ord_num
+            tests:
+              - not_null
+      - name: cust_info
+        description: "Daily-snapshotted customer master from CRM"
+        columns:
+          - name: snapshot_date
+            tests:
+              - not_null
+          - name: cst_id
+            # Real sant3e data has a handful of null cst_ids; keep the test
+            # but configure it as a warning so the demo pipeline still completes.
+            tests:
+              - not_null:
+                  severity: warn
+      - name: loc_a101
+        description: "Daily-snapshotted customer location master from ERP"
+        columns:
+          - name: snapshot_date
+            tests:
+              - not_null
+      - name: prd_info
+        description: >
+          MONTHLY-snapshotted CRM product master. A single row-set per month
+          (snapshot_month = YYYY-MM-01). Downstream models join daily facts to
+          whichever snapshot_month is "currently in effect" for that day.
+        columns:
+          - name: snapshot_month
+            description: "First-of-month date indicating which month this row belongs to"
+            tests:
+              - not_null
+          - name: prd_id
+            tests:
+              - not_null

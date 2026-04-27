@@ -1,0 +1,89 @@
+version: 2
+
+models:
+  - name: raw_crm_cust_info
+    description: "Current customer master (latest snapshot per cst_id) from Dagster-landed daily CSVs"
+    columns:
+      - name: cst_id
+        description: "Customer ID"
+        # Real sant3e data has a handful of null cst_ids; we configure this
+        # as a warning so the demo pipeline still completes. The red 'warned'
+        # badge in the Dagster UI is pedagogically useful.
+        tests:
+          - unique:
+              severity: warn
+          - not_null:
+              severity: warn
+      - name: cst_key
+        description: "Customer key"
+        tests:
+          - not_null
+      - name: snapshot_date
+        description: "Date of the snapshot that produced this row"
+        tests:
+          - not_null
+
+  - name: raw_crm_prd_info
+    description: "Current product master (latest snapshot_month per prd_id) from Dagster-landed monthly CSV"
+    columns:
+      - name: prd_id
+        description: "Product ID"
+        tests:
+          - unique
+          - not_null
+      - name: prd_key
+        description: "Product key"
+        tests:
+          - not_null
+      - name: snapshot_month
+        description: "First-of-month date for the snapshot that produced this row"
+        tests:
+          - not_null
+
+  - name: raw_crm_sales_details
+    description: "Sales transactions (latest snapshot per order+product) from Dagster-landed daily CSVs"
+    columns:
+      - name: sls_ord_num
+        description: "Sales order number"
+        tests:
+          - not_null
+      - name: sls_prd_key
+        description: "Sales product key"
+        tests:
+          - not_null
+      - name: sls_cust_id
+        description: "Sales customer ID"
+        tests:
+          - not_null
+      - name: snapshot_date
+        tests:
+          - not_null
+
+  - name: raw_erp_CUST_AZ12
+    description: "Static ERP customer reference (seeded)"
+    columns:
+      - name: CID
+        description: "Customer ID"
+        tests:
+          - unique
+          - not_null
+
+  - name: raw_erp_LOC_A101
+    description: "Current customer location master (latest snapshot per CID) from Dagster-landed daily CSVs"
+    columns:
+      - name: CID
+        description: "Customer ID"
+        tests:
+          - not_null
+      - name: snapshot_date
+        tests:
+          - not_null
+
+  - name: raw_erp_PX_CAT_G1V2
+    description: "Static ERP product category taxonomy (seeded)"
+    columns:
+      - name: ID
+        description: "Category ID"
+        tests:
+          - unique
+          - not_null

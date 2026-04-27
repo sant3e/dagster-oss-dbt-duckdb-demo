@@ -1,0 +1,9 @@
+groups:
+  - name: elt_team
+    owner:
+      name: ELT Engineering
+      email: elt-team@example.com
+  - name: ml_team
+    owner:
+      name: ML Engineering
+      email: ml-team@example.com

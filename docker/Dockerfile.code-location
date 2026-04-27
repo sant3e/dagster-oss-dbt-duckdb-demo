@@ -1,0 +1,49 @@
+FROM python:3.11-slim
+
+ARG CODE_LOCATION
+ENV CODE_LOCATION=${CODE_LOCATION}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir uv
+
+ENV DAGSTER_HOME=/opt/dagster/dagster_home \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DBT_PROJECT_DIR=/opt/dbt_project \
+    DBT_PROFILES_DIR=/opt/dbt_project \
+    DUCKDB_PATH=/warehouse/oss_template.duckdb \
+    DATA_LANDING_DIR=/data/landing
+
+RUN mkdir -p $DAGSTER_HOME /opt/dbt_project /warehouse /data/landing
+
+# Core Dagster + dbt + DuckDB + ML libs shared by both code locations.
+RUN uv pip install --system --no-cache-dir \
+    "dagster==1.12.22" \
+    "dagster-dbt==0.28.22" \
+    "dagster-duckdb==0.28.22" \
+    "dbt-core==1.10.20" \
+    "dbt-duckdb==1.10.1" \
+    "duckdb==1.1.3" \
+    "pandas==2.2.3" \
+    "pydantic-settings==2.6.1" \
+    "scikit-learn==1.5.2" \
+    "joblib==1.4.2"
+
+# Copy the dbt project first so we can parse a manifest at build time.
+COPY dbt_project /opt/dbt_project
+WORKDIR /opt/dbt_project
+RUN dbt deps --profiles-dir /opt/dbt_project || true
+RUN dbt parse --profiles-dir /opt/dbt_project || true
+
+# Copy and install the specific code-location package.
+COPY code_locations/${CODE_LOCATION} /opt/code_location
+WORKDIR /opt/code_location
+RUN uv pip install --system --no-cache-dir -e .
+
+WORKDIR /opt/code_location
+EXPOSE 4000
+
+# The gRPC command is supplied by docker-compose per service.

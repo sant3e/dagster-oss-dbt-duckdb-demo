@@ -1,0 +1,25 @@
+[project]
+name = "ml_pipelines"
+version = "0.1.0"
+description = "ML code location: RFM segmentation + churn-risk classification on dbt ml_features"
+requires-python = ">=3.11"
+dependencies = [
+    "dagster>=1.12.0",
+    "dagster-dbt>=0.28.0",
+    "dagster-duckdb>=0.28.0",
+    "dbt-core>=1.10.0",
+    "dbt-duckdb>=1.10.0",
+    "duckdb>=1.1.0",
+    "pandas>=2.2.0",
+    "pydantic-settings>=2.6.0",
+    "scikit-learn>=1.5.0",
+    "joblib>=1.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.dagster]
+module_name = "ml_pipelines.definitions"
+code_location_name = "ml_pipelines"

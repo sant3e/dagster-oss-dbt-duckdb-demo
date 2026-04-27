@@ -1,0 +1,108 @@
+name: dagster_oss_template
+
+services:
+
+  webserver:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dagster
+    image: dagster_oss_template/dagster:latest
+    container_name: dagster_webserver
+    ports:
+      - "3000:3000"
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+    volumes:
+      - ./dagster_home:/opt/dagster/dagster_home
+      - ./warehouse:/warehouse
+      - ./dbt_project:/opt/dbt_project
+      - ./data:/data
+    depends_on:
+      - elt_pipelines
+      - ml_pipelines
+    command: >
+      dagster-webserver
+      -h 0.0.0.0
+      -p 3000
+      -w /opt/dagster/dagster_home/workspace.yaml
+    networks:
+      - dagster_net
+
+  daemon:
+    image: dagster_oss_template/dagster:latest
+    container_name: dagster_daemon
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+    volumes:
+      - ./dagster_home:/opt/dagster/dagster_home
+      - ./warehouse:/warehouse
+      - ./dbt_project:/opt/dbt_project
+      - ./data:/data
+    depends_on:
+      - webserver
+    command: dagster-daemon run
+    networks:
+      - dagster_net
+
+  elt_pipelines:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.code-location
+      args:
+        CODE_LOCATION: elt_pipelines
+    image: dagster_oss_template/elt_pipelines:latest
+    container_name: dagster_elt_pipelines
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      DUCKDB_PATH: /warehouse/oss_template.duckdb
+      DATA_LANDING_DIR: /data/landing
+      DBT_PROJECT_DIR: /opt/dbt_project
+      DBT_PROFILES_DIR: /opt/dbt_project
+    volumes:
+      - ./warehouse:/warehouse
+      - ./dbt_project:/opt/dbt_project
+      - ./data:/data
+      # Bind-mount source so Python edits are picked up on container restart (no rebuild).
+      - ./code_locations/elt_pipelines/elt_pipelines:/opt/code_location/elt_pipelines
+    command: >
+      /bin/bash -c "
+      cd /opt/dbt_project &&
+      dbt parse --profiles-dir /opt/dbt_project --target-path /tmp/dbt_target &&
+      cd /opt/code_location &&
+      exec dagster api grpc -h 0.0.0.0 -p 4000 -m elt_pipelines.definitions
+      "
+    networks:
+      - dagster_net
+
+  ml_pipelines:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.code-location
+      args:
+        CODE_LOCATION: ml_pipelines
+    image: dagster_oss_template/ml_pipelines:latest
+    container_name: dagster_ml_pipelines
+    environment:
+      DAGSTER_HOME: /opt/dagster/dagster_home
+      DUCKDB_PATH: /warehouse/oss_template.duckdb
+      DBT_PROJECT_DIR: /opt/dbt_project
+      DBT_PROFILES_DIR: /opt/dbt_project
+    volumes:
+      - ./warehouse:/warehouse
+      - ./dbt_project:/opt/dbt_project
+      - ./data:/data
+      # Bind-mount source so Python edits are picked up on container restart (no rebuild).
+      - ./code_locations/ml_pipelines/ml_pipelines:/opt/code_location/ml_pipelines
+    command: >
+      /bin/bash -c "
+      cd /opt/dbt_project &&
+      dbt parse --profiles-dir /opt/dbt_project --target-path /tmp/dbt_target &&
+      cd /opt/code_location &&
+      exec dagster api grpc -h 0.0.0.0 -p 4000 -m ml_pipelines.definitions
+      "
+    networks:
+      - dagster_net
+
+networks:
+  dagster_net:
+    driver: bridge

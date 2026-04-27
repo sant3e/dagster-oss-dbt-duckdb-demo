@@ -1,0 +1,8 @@
+dbt_oss_template:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', '/warehouse/oss_template.duckdb') }}"
+      threads: 1
+      schema: main

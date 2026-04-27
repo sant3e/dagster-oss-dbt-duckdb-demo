@@ -1,0 +1,3 @@
+# No third-party dbt packages required by this template.
+# Uncomment and add packages here if your models start using them.
+packages: []

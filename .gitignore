@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# uv
+.uv/
+uv.lock
+
+# Dagster runtime state (SQLite + file-backed storage + compute logs)
+dagster_home/storage/
+dagster_home/history/
+dagster_home/schedules/
+dagster_home/logs/
+dagster_home/compute_logs/
+*.db
+*.db-journal
+
+# DuckDB warehouse + ML artifacts (created at runtime)
+warehouse/*.duckdb
+warehouse/*.duckdb.wal
+warehouse/*.duckdb.tmp
+warehouse/artifacts/
+
+# dbt per-invocation state
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/logs/
+dbt_project/.user.yml
+dbt_project/.ported
+
+# Landing data: the FOUR day-1 files ship with the repo as the demo's seed
+# dataset. Anything else a user drops in during the demo (copied from
+# future_landing_data/ or dropped by hand) is ignored so git status stays
+# clean after running the demo.
+data/landing/*
+!data/landing/.gitkeep
+!data/landing/cust_info_2026_04_01.csv
+!data/landing/loc_a101_2026_04_01.csv
+!data/landing/prd_info_2026_04.csv
+!data/landing/sales_details_2026_04_01.csv
+
+# Future landing data: the generator produces snapshots here on demand.
+# We DON'T commit those to git — each user can regenerate the exact set
+# they want via `scripts/generate_future_landing_data.py`. Only the README
+# is tracked so the folder documents itself.
+future_landing_data/*
+!future_landing_data/README.md
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
