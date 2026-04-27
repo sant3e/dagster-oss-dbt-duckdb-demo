@@ -39,7 +39,19 @@ models:
         tests: [not_null]
 
   - name: stg_erp_CUST_AZ12
-    description: "Cleaned ERP customer reference (seeded, not partitioned)"
+    description: "Cleaned ERP customer reference, daily-partitioned via the seed stamp in landing"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [CID, snapshot_date]
+          config:
+            severity: warn
+    columns:
+      - name: CID
+        tests:
+          - not_null:
+              severity: warn
+      - name: snapshot_date
+        tests: [not_null]
 
   - name: stg_erp_LOC_A101
     description: "Cleaned ERP location data for the current partition"
@@ -48,4 +60,12 @@ models:
         tests: [not_null]
 
   - name: stg_erp_PX_CAT_G1V2
-    description: "Trimmed category taxonomy (seeded, not partitioned)"
+    description: "Cleaned category taxonomy, daily-partitioned via the seed stamp in landing"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ID, snapshot_date]
+    columns:
+      - name: ID
+        tests: [not_null]
+      - name: snapshot_date
+        tests: [not_null]

@@ -1,32 +1,30 @@
 """dbt assets for the elt layers: landing, staging, mart, reporting.
 
-Every model in these layers is **daily-partitioned on snapshot_date**.
+Every non-seed dbt model is **daily-partitioned on snapshot_date**.
 Dagster extracts the current partition date from `context.partition_time_window.start`
 and passes it to dbt via `--vars '{"snapshot_dt": "YYYY-MM-DD"}'`. Every
 partitioned dbt model filters its own upstream refs by that var, so a
 given run produces exactly one row-set per model for that partition.
 
-Seeds are NOT partitioned (they're static reference data), so they live
-in a SEPARATE @dbt_assets block without a partitions_def.
+Seeds (CUST_AZ12, PX_CAT_G1V2) themselves are NOT partitioned — they're
+git-tracked static reference data loaded via `dbt seed`. Their landing
+wrappers (raw_erp_CUST_AZ12, raw_erp_PX_CAT_G1V2) stamp
+`snapshot_date = '{{ var("snapshot_dt") }}'::DATE` onto every row, which
+is what carries the seed data onto the daily partition grid for the rest
+of the pipeline. From staging onward the seed chain is indistinguishable
+from the other partitioned data — same JOIN predicates, same
+AutomationCondition behaviour.
 
-Every partitioned dbt model downstream of the daily-cadence landings
-carries `AutomationCondition.eager()` (applied via the translator's
-`get_automation_condition`). As soon as an upstream partition
-materializes, the corresponding downstream partition auto-fires —
-evaluated by Dagster's built-in `default_automation_condition_sensor`.
+AutomationCondition attached to every partitioned non-seed model EXCEPT
+those tagged `latest_available_source` / `latest_available` (those are
+handled by `cross_partition_sensor` — ported from imp_finance_mart —
+which fires them in expansion mode so daily runs can reuse the
+latest-available monthly snapshot until a newer one arrives).
 
-Models tagged `latest_available_source` (slow-cadence projection onto
-the daily grid — e.g. `raw_crm_prd_info` reading the monthly product
-source) and `latest_available` (consumers of the projection — e.g.
-`stg_crm_prd_info`) are deliberately EXCLUDED from AutomationCondition.
-They're driven by `cross_partition_sensor` (ported from imp_finance_mart),
-which fires them daily in expansion mode, reusing the latest-available
-monthly snapshot until a new monthly snapshot arrives.
-
-ML assets in ml_pipelines also deliberately lack AutomationCondition —
-the `elt_to_ml_bridge_sensor` is the explicit on/off gate for the ml
-chain. Turn that sensor on to allow ml to train per partition; turn
-it off and the ml chain stops firing while elt keeps running.
+ML assets in ml_pipelines lack AutomationCondition — the
+`elt_to_ml_bridge_sensor` is the explicit on/off gate for the ml chain.
+Turn that sensor on to allow ml to train per partition; turn it off and
+the ml chain stops firing while elt keeps running.
 """
 
 import json
@@ -71,19 +69,10 @@ def _layer_from_path(original_file_path: str) -> str | None:
     return None
 
 
-# Models that are part of the seed chain (unpartitioned, no automation).
-_SEED_CHAIN_MODEL_NAMES = {
-    "raw_erp_CUST_AZ12",
-    "raw_erp_PX_CAT_G1V2",
-    "stg_erp_CUST_AZ12",
-    "stg_erp_PX_CAT_G1V2",
-}
-
-
 class EltDbtTranslator(DagsterDbtTranslator):
     """Prefix asset keys with their dbt layer folder, assign sensible
     group names to seeds + sources, and attach AutomationCondition.eager()
-    to every partitioned model so downstream hops auto-cascade.
+    to every partitioned model except the sensor-gated tagged ones.
     """
 
     def get_asset_key(self, dbt_resource_props) -> AssetKey:
@@ -103,24 +92,21 @@ class EltDbtTranslator(DagsterDbtTranslator):
         return super().get_group_name(dbt_resource_props)
 
     def get_automation_condition(self, dbt_resource_props):
-        """AutomationCondition.eager() attached to every partitioned model
-        EXCEPT the ones whose parent is `latest_available_source` and those
-        that have `latest_available` themselves. Those are driven by the
-        `cross_partition_sensor` so they can fire daily even when the
-        monthly upstream hasn't changed.
+        """AutomationCondition.eager() for every partitioned non-seed model
+        EXCEPT those tagged `latest_available_source` / `latest_available`,
+        which are handled by `cross_partition_sensor` so they can fire
+        daily even when their slow-cadence upstream hasn't changed.
 
-        NOT attached to:
-        - seeds + seed-chain wrappers (unpartitioned static reference data).
-        - models tagged `latest_available_source` — they're "projection" models
-          that adapt a slow-cadence source onto the daily snapshot grid.
-          Their behavior is tied to the sensor, not eager().
-        - models tagged `latest_available` — explicitly sensor-gated by the
-          tag-driven expansion sensor.
+        Seeds themselves return None — they're not partitioned and
+        don't participate in the daily cascade. Running `dbt seed` or
+        invoking `dbt_seed_job` materializes them once; their downstream
+        landing wrapper (raw_erp_*) carries eager() like every other
+        partitioned asset, so the first `--vars snapshot_dt` run after
+        the seed materialization will re-read the seed and stamp it
+        onto that day's partition.
         """
         tags = dbt_resource_props.get("tags", []) or []
         if dbt_resource_props.get("resource_type") == "seed":
-            return None
-        if dbt_resource_props.get("name") in _SEED_CHAIN_MODEL_NAMES:
             return None
         if "latest_available_source" in tags:
             return None
@@ -135,23 +121,14 @@ translator = EltDbtTranslator(
 
 
 # ---------------------------------------------------------------------------
-# Partitioned models: everything except ml_features AND except the seed
-# chain (seeds + their raw_erp_* landing wrappers + their stg_erp_*
-# staging wrappers). Each partitioned run passes --vars snapshot_dt to
-# dbt, which every model filters on.
+# Partitioned models: everything except seeds. The raw_erp_* and stg_erp_*
+# seed wrappers live here now too — they're daily-partitioned via the
+# snapshot_date stamp applied in the landing model.
 # ---------------------------------------------------------------------------
-_SEED_CHAIN_EXCLUDES = [
-    "resource_type:seed",
-    "fqn:dbt_oss_template.landing.raw_erp_CUST_AZ12",
-    "fqn:dbt_oss_template.landing.raw_erp_PX_CAT_G1V2",
-    "fqn:dbt_oss_template.staging.stg_erp_CUST_AZ12",
-    "fqn:dbt_oss_template.staging.stg_erp_PX_CAT_G1V2",
-]
-
 @dbt_assets(
     manifest=dbt_project.manifest_path,
     select="fqn:dbt_oss_template.landing.* fqn:dbt_oss_template.staging.* fqn:dbt_oss_template.mart.* fqn:dbt_oss_template.reporting.*",
-    exclude=" ".join(_SEED_CHAIN_EXCLUDES),
+    exclude="resource_type:seed",
     dagster_dbt_translator=translator,
     partitions_def=daily_partitions,
     backfill_policy=BackfillPolicy.multi_run(),
@@ -167,20 +144,14 @@ def elt_dbt_assets(context: AssetExecutionContext, dbt: DbtCliResource):
 
 
 # ---------------------------------------------------------------------------
-# Seed chain: seeds + the raw_erp_* landing wrappers + the stg_erp_*
-# staging wrappers. ALL unpartitioned (static reference data). Separate
-# @dbt_assets block so it can participate in the asset graph without
-# being bound to a daily partition.
+# Seeds only: the two actual dbt seeds (CUST_AZ12, PX_CAT_G1V2).
+# Unpartitioned static reference data. Materialized once via dbt_seed_job
+# (Step 1 of the demo). Downstream raw_erp_* landing wrappers pick up the
+# seed data into the daily partition grid via AutomationCondition.
 # ---------------------------------------------------------------------------
 @dbt_assets(
     manifest=dbt_project.manifest_path,
-    select=(
-        "resource_type:seed "
-        "fqn:dbt_oss_template.landing.raw_erp_CUST_AZ12 "
-        "fqn:dbt_oss_template.landing.raw_erp_PX_CAT_G1V2 "
-        "fqn:dbt_oss_template.staging.stg_erp_CUST_AZ12 "
-        "fqn:dbt_oss_template.staging.stg_erp_PX_CAT_G1V2"
-    ),
+    select="resource_type:seed",
     dagster_dbt_translator=translator,
     op_tags=DUCKDB_WRITER_TAGS,
     retry_policy=TRANSIENT_LOCK_RETRY_POLICY,

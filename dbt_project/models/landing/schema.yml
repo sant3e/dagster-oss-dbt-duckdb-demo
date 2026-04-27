@@ -70,12 +70,17 @@ models:
           - not_null
 
   - name: raw_erp_CUST_AZ12
-    description: "Static ERP customer reference (seeded, not partitioned)"
+    description: "ERP customer reference — seeded + stamped onto the daily partition grid"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [CID, snapshot_date]
     columns:
       - name: CID
         description: "Customer ID"
         tests:
-          - unique
+          - not_null
+      - name: snapshot_date
+        tests:
           - not_null
 
   - name: raw_erp_LOC_A101
@@ -93,10 +98,15 @@ models:
           - not_null
 
   - name: raw_erp_PX_CAT_G1V2
-    description: "Static ERP product category taxonomy (seeded, not partitioned)"
+    description: "ERP product category taxonomy — seeded + stamped onto the daily partition grid"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ID, snapshot_date]
     columns:
       - name: ID
         description: "Category ID"
         tests:
-          - unique
+          - not_null
+      - name: snapshot_date
+        tests:
           - not_null

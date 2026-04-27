@@ -1,20 +1,28 @@
 """Jobs for elt_pipelines.
 
-- `dbt_seed_job`: materializes the two seed assets AND the two ERP staging
-  models that depend on them. All non-partitioned (static reference data).
-  Run this manually to bootstrap the warehouse before landing starts.
+- `dbt_seed_job`: materializes ONLY the two dbt seeds (CUST_AZ12,
+  PX_CAT_G1V2). Unpartitioned static reference data. Run this manually
+  as Step 1 of the demo to load the seed tables into DuckDB.
+  After seeds materialize, AutomationCondition.eager() on their
+  downstream `raw_erp_*` landing wrappers auto-fires them for the
+  relevant daily partition — so running daily landings
+  (landing_daily_job) will also pull the latest seed content into
+  that day's partition.
 
-- `landing_daily_job`: targets the three daily-partitioned landing assets
-  so users can backfill many days at once.
+- `landing_daily_job`: the three daily-partitioned Dagster-owned
+  landing assets (raw/raw_sales_details + raw_cust_info + raw_loc_a101).
+  Fired by landing_file_sensor when daily CSVs arrive; also usable
+  manually for backfills.
 
-- `landing_monthly_job`: targets the monthly-partitioned product-master
-  landing asset.
+- `landing_monthly_job`: the monthly-partitioned product-master
+  landing asset (raw/raw_prd_info_monthly). Fired by
+  landing_file_sensor when the monthly CSV arrives.
 
-- `dbt_elt_landing_job`: runs the daily-partitioned dbt LANDING models
-  (landing/raw_crm_*) for a SINGLE partition_key. Fired by
-  daily_monthly_bridge_sensor once the cadence gate opens. After this
-  runs, AutomationCondition.eager() on staging/mart/reporting
-  auto-cascades the rest of the partition through the graph.
+- `dbt_elt_landing_job`: kept for manual backfills of the dbt landing
+  layer (landing/raw_crm_*) for a specific partition_key.
+  AutomationCondition.eager() on staging / mart / reporting
+  auto-cascades from there, so the common flow does not invoke this
+  job directly — it's handy only for targeted reruns.
 """
 
 from dagster import AssetKey, AssetSelection, define_asset_job
@@ -42,31 +50,25 @@ landing_monthly_job = define_asset_job(
     description="Runs the monthly-partitioned product-master landing asset.",
 )
 
-# Seed-only job: seeds + their raw_erp_* landing wrappers + their stg_erp_*
-# staging wrappers. All non-partitioned (static reference data).
+# Seeds-only. The raw_erp_* / stg_erp_* models are now part of the
+# partitioned ELT chain, driven by AutomationCondition.
 dbt_seed_job = define_asset_job(
     name="dbt_seed_job",
     selection=AssetSelection.keys(
         AssetKey(["seeds", "CUST_AZ12"]),
         AssetKey(["seeds", "PX_CAT_G1V2"]),
-        AssetKey(["landing", "raw_erp_CUST_AZ12"]),
-        AssetKey(["landing", "raw_erp_PX_CAT_G1V2"]),
-        AssetKey(["staging", "stg_erp_CUST_AZ12"]),
-        AssetKey(["staging", "stg_erp_PX_CAT_G1V2"]),
     ).without_checks(),
     tags=DUCKDB_WRITER_TAGS,
     description=(
-        "Materializes the static seed chain: seeds (CUST_AZ12, PX_CAT_G1V2) "
-        "+ their raw_erp_* landing wrappers + their stg_erp_* staging wrappers. "
-        "All unpartitioned."
+        "Materializes the two dbt seeds (CUST_AZ12, PX_CAT_G1V2). "
+        "Unpartitioned reference data. Run once as Step 1 of the demo "
+        "before firing daily landings."
     ),
 )
 
-# Daily-partitioned LANDING-only job — fired by the cadence bridge sensor.
-# Targets ONLY the dbt landing models (landing/raw_crm_*). Once these
-# materialize for a partition, AutomationCondition.eager() on staging /
-# mart / reporting takes over and auto-cascades the rest of the partition
-# through the graph.
+# Daily-partitioned landing job (all 6 dbt landing models).
+# Kept for manual backfills / targeted reruns; the default flow uses
+# AutomationCondition to cascade, not this job.
 dbt_elt_landing_job = define_asset_job(
     name="dbt_elt_landing_job",
     selection=AssetSelection.keys(
@@ -74,13 +76,13 @@ dbt_elt_landing_job = define_asset_job(
         AssetKey(["landing", "raw_crm_prd_info"]),
         AssetKey(["landing", "raw_crm_sales_details"]),
         AssetKey(["landing", "raw_erp_LOC_A101"]),
+        AssetKey(["landing", "raw_erp_CUST_AZ12"]),
+        AssetKey(["landing", "raw_erp_PX_CAT_G1V2"]),
     ).without_checks(),
     partitions_def=daily_partitions,
     tags=DUCKDB_WRITER_TAGS,
     description=(
-        "Daily-partitioned dbt landing models. Fired by "
-        "daily_monthly_bridge_sensor once both the daily file landings "
-        "AND the monthly product landing are ready for a given day. "
+        "Daily-partitioned dbt landing models (all 6: raw_crm_* + raw_erp_*). "
         "AutomationCondition on staging/mart/reporting auto-cascades "
         "from here per-partition."
     ),

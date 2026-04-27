@@ -6,8 +6,9 @@
     )
 }}
 
--- Customer dimension for the current partition. Merges CRM staging with
--- ERP reference (seeded, not partitioned) and location master (partitioned).
+-- Customer dimension for the current partition. Merges CRM staging
+-- (daily landing) with ERP reference (seeded, now daily-partitioned via
+-- raw_erp_CUST_AZ12) and location master (daily landing).
 -- `customer_key` is a surrogate generated within the partition; downstream
 -- fact joins always co-filter on snapshot_date so keys only need to be
 -- consistent within a single partition.
@@ -31,6 +32,7 @@ SELECT
 FROM {{ ref('stg_crm_cust_info') }} ci
 LEFT JOIN {{ ref('stg_erp_CUST_AZ12') }} ca
     ON ci.cst_key = ca.cid
+    AND ca.snapshot_date = ci.snapshot_date
 LEFT JOIN {{ ref('stg_erp_LOC_A101') }} la
     ON ci.cst_key = la.cid
     AND la.snapshot_date = ci.snapshot_date

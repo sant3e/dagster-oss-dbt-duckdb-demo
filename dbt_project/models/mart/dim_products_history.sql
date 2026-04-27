@@ -7,8 +7,9 @@
 }}
 
 -- Historical products (SCD-style with prd_end_dt derived via LEAD upstream),
--- filtered to the current partition. stg_erp_PX_CAT_G1V2 is seeded, not
--- partitioned, so joined without a snapshot_date predicate.
+-- filtered to the current partition. stg_erp_PX_CAT_G1V2 is now
+-- daily-partitioned (the seed is stamped onto the daily grid in the
+-- landing model), so we co-filter on snapshot_date like every other join.
 SELECT
     ROW_NUMBER() OVER (ORDER BY pn.prd_start_dt, pn.prd_key) AS product_key,
     pn.prd_id AS product_id,
@@ -28,4 +29,5 @@ SELECT
 FROM {{ ref('stg_crm_prd_info') }} pn
 LEFT JOIN {{ ref('stg_erp_PX_CAT_G1V2') }} pc
     ON pn.cat_id = pc.id
+    AND pc.snapshot_date = pn.snapshot_date
 WHERE pn.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
