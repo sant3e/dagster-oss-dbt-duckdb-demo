@@ -33,11 +33,6 @@ snapshots:
 
 models:
   dbt_oss_template:
-    landing:
-      +schema: landing
-      +materialized: table
-      +group: elt_team
-      +access: private
     staging:
       +schema: staging
       +materialized: table

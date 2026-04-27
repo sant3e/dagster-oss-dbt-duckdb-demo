@@ -6,16 +6,21 @@
     )
 }}
 
--- Cleaned customer master for the current partition. Ported from Snowflake:
--- QUALIFY rewritten as CTE + WHERE rn=1 (DuckDB has no QUALIFY).
+-- Cleaned customer master for the current partition. Reads directly from
+-- the Dagster-landed raw table via the dbt source (which collapses onto
+-- the Python landing AssetKey via meta.dagster.asset_key in sources.yml).
 --
 -- The ROW_NUMBER dedupe protects against duplicate cst_id rows within the
 -- same daily snapshot (if a source ever repeats a customer in a single CSV).
 -- Cross-day dedup is not needed — each partition is processed in isolation.
+--
+-- snapshot_date is cast to DATE in the SELECT because _landing_shared.py
+-- writes the column as VARCHAR into DuckDB; casting here prevents VARCHAR
+-- leaking into downstream mart joins.
 WITH cleaned AS (
     SELECT
-        cst_id,
-        cst_key,
+        cst_id::INTEGER AS cst_id,
+        cst_key::VARCHAR AS cst_key,
         TRIM(cst_firstname) AS cst_firstname,
         TRIM(cst_lastname) AS cst_lastname,
         CASE
@@ -28,11 +33,11 @@ WITH cleaned AS (
             WHEN UPPER(TRIM(cst_gndr)) = 'M' THEN 'Male'
             ELSE 'N/A'
         END AS cst_gndr,
-        cst_create_date,
-        snapshot_date,
+        cst_create_date::DATE AS cst_create_date,
+        snapshot_date::DATE AS snapshot_date,
         ROW_NUMBER() OVER (PARTITION BY cst_id ORDER BY cst_create_date DESC) AS rn
-    FROM {{ ref('raw_crm_cust_info') }}
-    WHERE snapshot_date = '{{ var("snapshot_dt") }}'::DATE
+    FROM {{ source('dagster_raw', 'cust_info') }}
+    WHERE snapshot_date::DATE = '{{ var("snapshot_dt") }}'::DATE
 )
 SELECT
     cst_id,

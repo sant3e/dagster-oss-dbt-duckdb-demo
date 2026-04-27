@@ -55,7 +55,12 @@ models:
 
   - name: stg_erp_LOC_A101
     description: "Cleaned ERP location data for the current partition"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [CID, snapshot_date]
     columns:
+      - name: CID
+        tests: [not_null]
       - name: snapshot_date
         tests: [not_null]
 

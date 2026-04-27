@@ -29,7 +29,7 @@ cp future_landing_data/*.csv data/landing/
 
 Then:
 - `landing_file_sensor` picks up each new CSV within ~30 s and kicks the matching partitioned landing asset (daily or monthly, automatically).
-- `AutomationCondition.eager()` on the daily-source dbt models (`raw_crm_*`, `stg_crm_*`, `stg_erp_LOC_A101`, mart, reporting) auto-fires them per partition as the raw landings materialize.
+- `AutomationCondition.eager()` on the dbt staging models (`stg_crm_*`, `stg_erp_*`), all of mart, all of reporting auto-fires them per partition as the upstream `raw/*` Python landing assets materialize.
 - `cross_partition_sensor` fires `mart/dim_products_history` for each new daily partition in expansion mode, reusing the latest monthly product snapshot whenever a newer one isn't available. May days drop into this cascade too: they'll materialize using April's monthly product data until you drop the May monthly file, at which point later May partitions switch to May's snapshot.
 
 ## Regenerating / generating more days

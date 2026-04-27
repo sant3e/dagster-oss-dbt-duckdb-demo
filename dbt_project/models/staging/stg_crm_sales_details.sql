@@ -6,41 +6,45 @@
     )
 }}
 
+-- Cleaned sales transactions for the current partition. Reads directly
+-- from the Dagster-landed raw table via the dbt source.
+--
 -- Ported from Snowflake:
 --   LENGTH(CAST(x AS STRING))  → length(x::VARCHAR)
 --   TO_DATE(CAST(x AS STRING), 'YYYYMMDD') → strptime(x::VARCHAR, '%Y%m%d')::DATE
--- The upstream landing model is already filtered to the current partition;
--- we pass `snapshot_date` through unchanged so downstream marts can keep
--- filtering uniformly.
+--
+-- snapshot_date is cast to DATE in the SELECT because _landing_shared.py
+-- writes the column as VARCHAR into DuckDB; casting here prevents VARCHAR
+-- leaking into downstream mart joins.
 WITH raw_data AS (
     SELECT
-        sls_ord_num,
-        REPLACE(sls_prd_key, '-', '_') AS sls_prd_key,
-        sls_cust_id,
+        sls_ord_num::VARCHAR AS sls_ord_num,
+        REPLACE(sls_prd_key::VARCHAR, '-', '_') AS sls_prd_key,
+        sls_cust_id::INTEGER AS sls_cust_id,
         CASE
-            WHEN sls_order_dt IS NULL OR sls_order_dt <= 0
+            WHEN sls_order_dt IS NULL OR sls_order_dt::INTEGER <= 0
               OR length(sls_order_dt::VARCHAR) != 8
             THEN NULL
             ELSE strptime(sls_order_dt::VARCHAR, '%Y%m%d')::DATE
         END AS sls_order_dt,
         CASE
-            WHEN sls_ship_dt IS NULL OR sls_ship_dt <= 0
+            WHEN sls_ship_dt IS NULL OR sls_ship_dt::INTEGER <= 0
               OR length(sls_ship_dt::VARCHAR) != 8
             THEN NULL
             ELSE strptime(sls_ship_dt::VARCHAR, '%Y%m%d')::DATE
         END AS sls_ship_dt,
         CASE
-            WHEN sls_due_dt IS NULL OR sls_due_dt <= 0
+            WHEN sls_due_dt IS NULL OR sls_due_dt::INTEGER <= 0
               OR length(sls_due_dt::VARCHAR) != 8
             THEN NULL
             ELSE strptime(sls_due_dt::VARCHAR, '%Y%m%d')::DATE
         END AS sls_due_dt,
-        sls_sales,
-        sls_quantity,
-        sls_price,
-        snapshot_date
-    FROM {{ ref('raw_crm_sales_details') }}
-    WHERE snapshot_date = '{{ var("snapshot_dt") }}'::DATE
+        sls_sales::INTEGER AS sls_sales,
+        sls_quantity::INTEGER AS sls_quantity,
+        sls_price::INTEGER AS sls_price,
+        snapshot_date::DATE AS snapshot_date
+    FROM {{ source('dagster_raw', 'sales_details') }}
+    WHERE snapshot_date::DATE = '{{ var("snapshot_dt") }}'::DATE
 ),
 step1_corrected_price AS (
     SELECT *,

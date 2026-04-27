@@ -46,7 +46,7 @@ dbt_project.prepare_if_dev()
 
 def _layer_from_path(original_file_path: str) -> str | None:
     path = (original_file_path or "").replace("\\", "/")
-    for layer in ("landing", "staging", "mart", "reporting", "ml_features"):
+    for layer in ("staging", "mart", "reporting", "ml_features"):
         if f"models/{layer}/" in path:
             return layer
     return None

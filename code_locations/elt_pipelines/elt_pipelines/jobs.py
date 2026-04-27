@@ -2,7 +2,10 @@
 
 - `dbt_seed_job`: materializes ONLY the two dbt seeds (CUST_AZ12,
   PX_CAT_G1V2). Unpartitioned static reference data. Run this manually
-  as Step 1 of the demo to load the seed tables into DuckDB.
+  as Step 1 of the demo to load the seed tables into DuckDB. The
+  downstream staging models (`stg_erp_CUST_AZ12`, `stg_erp_PX_CAT_G1V2`)
+  read the seed directly and stamp `snapshot_date` onto every row per
+  partition via AutomationCondition.
 
 - `landing_daily_job`: the three daily-partitioned Dagster-owned
   landing assets (raw/raw_sales_details + raw_cust_info + raw_loc_a101).
@@ -12,18 +15,11 @@
 - `landing_monthly_job`: the monthly-partitioned product-master
   landing asset (raw/raw_prd_info_monthly). Fired by
   landing_file_sensor when the monthly CSV arrives.
-
-- `dbt_elt_landing_job`: kept for manual backfills of the dbt landing
-  layer for a specific partition_key. AutomationCondition.eager() on
-  staging / mart / reporting auto-cascades from there, so the common
-  flow does not invoke this job directly — it's handy only for
-  targeted reruns.
 """
 
 from dagster import AssetKey, AssetSelection, define_asset_job
 
 from elt_pipelines.constants import DUCKDB_WRITER_TAGS
-from elt_pipelines.partitions import daily_partitions
 
 landing_daily_job = define_asset_job(
     name="landing_daily_job",
@@ -56,29 +52,10 @@ dbt_seed_job = define_asset_job(
     description=(
         "Materializes the two dbt seeds (CUST_AZ12, PX_CAT_G1V2). "
         "Unpartitioned reference data. Run once as Step 1 of the demo "
-        "before firing daily landings."
-    ),
-)
-
-# Daily-partitioned landing job (all 6 dbt landing models).
-dbt_elt_landing_job = define_asset_job(
-    name="dbt_elt_landing_job",
-    selection=AssetSelection.keys(
-        AssetKey(["landing", "raw_crm_cust_info"]),
-        AssetKey(["landing", "raw_crm_prd_info"]),
-        AssetKey(["landing", "raw_crm_sales_details"]),
-        AssetKey(["landing", "raw_erp_LOC_A101"]),
-        AssetKey(["landing", "raw_erp_CUST_AZ12"]),
-        AssetKey(["landing", "raw_erp_PX_CAT_G1V2"]),
-    ),
-    partitions_def=daily_partitions,
-    tags=DUCKDB_WRITER_TAGS,
-    description=(
-        "Daily-partitioned dbt landing models (all 6: raw_crm_* + raw_erp_*). "
-        "AutomationCondition on staging/mart/reporting auto-cascades "
-        "from here per-partition."
+        "before firing daily landings. Downstream stg_erp_* staging "
+        "models read the seeds directly and stamp snapshot_date per partition."
     ),
 )
 
 
-all_jobs = [landing_daily_job, landing_monthly_job, dbt_elt_landing_job, dbt_seed_job]
+all_jobs = [landing_daily_job, landing_monthly_job, dbt_seed_job]

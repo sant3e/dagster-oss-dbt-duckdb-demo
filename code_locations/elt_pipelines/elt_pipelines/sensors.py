@@ -187,7 +187,7 @@ def find_assets_with_tag(manifest: dict, tag: str) -> List[dict]:
 
 def _layer_from_dbt_path(p: str) -> Optional[str]:
     p = (p or "").replace("\\", "/")
-    for layer in ("landing", "staging", "mart", "reporting", "ml_features"):
+    for layer in ("staging", "mart", "reporting", "ml_features"):
         if f"models/{layer}/" in p:
             return layer
     return None
@@ -251,6 +251,11 @@ def get_asset_dependencies_with_keys(
     `latest_available_source`. This matters here because the slow-cadence
     asset in our setup is a Dagster-owned landing (raw_prd_info_monthly),
     which appears in the manifest as a dbt source, not a dbt model.
+
+    A dep is classified `latest_available` iff it carries the
+    `latest_available_source` tag — i.e. it is a slow-cadence source that
+    downstream daily models must project onto the daily grid via
+    latest-available-on-or-before. Every other dep is `exact_match`.
     """
     node = manifest["nodes"][node_id]
     exact: List[Tuple[str, AssetKey]] = []

@@ -3,6 +3,18 @@ version: 2
 # Dagster-managed raw tables in DuckDB. These are populated by the partitioned
 # landing assets in elt_pipelines, NOT by dbt. dbt models in the landing layer
 # reference these via {{ source('dagster_raw', ...) }}.
+#
+# Each source table declares `config.meta.dagster.asset_key` that matches the
+# AssetKey emitted by the corresponding Python landing asset in
+# code_locations/elt_pipelines/elt_pipelines/assets/landing_*.py. That is how
+# dagster-dbt stitches the Python landings to the dbt landing models so the
+# asset graph is a single connected chain — without this, dbt sources would
+# default to AssetKey(["dagster_raw", "<name>"]) and form a third disconnected
+# island between the Python raw/* assets and the dbt landing/* models.
+#
+# This is the canonical pattern used by `imp_v2-dagster-etl` and
+# `fpa-finance_mart_w_data_vault` and documented in the official Dagster dbt
+# integration guide.
 sources:
   - name: dagster_raw
     description: "Raw tables populated by Dagster's partitioned landing assets"
@@ -10,6 +22,10 @@ sources:
     tables:
       - name: sales_details
         description: "Daily-snapshotted sales transactions from CRM (unioned across partitions)"
+        config:
+          meta:
+            dagster:
+              asset_key: ["raw", "raw_sales_details"]
         columns:
           - name: snapshot_date
             description: "Date the snapshot was captured (from the CSV filename)"
@@ -20,6 +36,10 @@ sources:
               - not_null
       - name: cust_info
         description: "Daily-snapshotted customer master from CRM"
+        config:
+          meta:
+            dagster:
+              asset_key: ["raw", "raw_cust_info"]
         columns:
           - name: snapshot_date
             tests:
@@ -32,6 +52,10 @@ sources:
                   severity: warn
       - name: loc_a101
         description: "Daily-snapshotted customer location master from ERP"
+        config:
+          meta:
+            dagster:
+              asset_key: ["raw", "raw_loc_a101"]
         columns:
           - name: snapshot_date
             tests:
@@ -41,6 +65,10 @@ sources:
           MONTHLY-snapshotted CRM product master. A single row-set per month
           (snapshot_month = YYYY-MM-01). Downstream models join daily facts to
           whichever snapshot_month is "currently in effect" for that day.
+        config:
+          meta:
+            dagster:
+              asset_key: ["raw", "raw_prd_info_monthly"]
         columns:
           - name: snapshot_month
             description: "First-of-month date indicating which month this row belongs to"

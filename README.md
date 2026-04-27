@@ -15,8 +15,7 @@ dagster_oss_template/
 ├── dagster_home/               dagster.yaml (SQLite storage, QueuedRunCoordinator) + workspace.yaml
 ├── dbt_project/                dbt + DuckDB project, ported from sant3e
 │   ├── models/
-│   │   ├── landing/            raw_* daily-partitioned (filter source by snapshot_dt)
-│   │   ├── staging/            stg_* daily-partitioned, cleaned
+│   │   ├── staging/            stg_* daily-partitioned, reads dbt sources or seeds, cleaned
 │   │   ├── mart/               dim_customers, dim_products, dim_products_history, fct_sales — daily-partitioned
 │   │   ├── reporting/          rpt_* daily-partitioned
 │   │   ├── ml_features/        customer_rfm (owned by ml_team) — daily-partitioned
@@ -90,13 +89,13 @@ Turn on **`elt_automation_condition_sensor`** (in the `elt_pipelines` code locat
 
 Turn on **`cross_partition_sensor`** too. Tag-driven sensor ported from `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. It reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source`) and fires one RunRequest per day in expansion mode — so the mart keeps materializing daily even while the underlying monthly source hasn't updated, reusing the latest monthly snapshot until a newer one arrives.
 
-With those three sensors on (plus `landing_file_sensor` from Step 2), partition `2026-04-01` should cascade end-to-end within ~90 seconds: landing dbt → staging → mart → reporting via AC, plus `dim_products_history` via the cross-partition sensor.
+With those three sensors on (plus `landing_file_sensor` from Step 2), partition `2026-04-01` should cascade end-to-end within ~90 seconds: `raw/*` (Python landing) → staging → mart → reporting via AC, plus `dim_products_history` via the cross-partition sensor.
 
 With both sensors on, partition `2026-04-01` cascades automatically end-to-end:
 - `raw/*` landings already materialized (Step 2).
-- `AutomationCondition.eager()` on `landing/raw_crm_*` (the ones fed by daily sources) fires those for 2026-04-01.
-- `cross_partition_sensor` fires `mart/dim_products_history` (tagged `latest_available`) for 2026-04-01, joining the April monthly snapshot from `stg_crm_prd_info` (tagged `latest_available_source`) with the daily seed-derived `stg_erp_PX_CAT_G1V2`.
-- `AutomationCondition.eager()` on the rest of staging, all of mart, all of reporting cascades down per-partition.
+- `AutomationCondition.eager()` on `staging/stg_*` (the ones fed by daily sources: `stg_crm_cust_info`, `stg_crm_sales_details`, `stg_erp_LOC_A101`) fires those for 2026-04-01 directly from their upstream `raw/*` Python assets.
+- `cross_partition_sensor` fires `mart/dim_products_history` (tagged `latest_available`) for 2026-04-01, joining the April monthly snapshot from `stg_crm_prd_info` (tagged `latest_available_source` — the dbt-side handle on the monthly source) with the daily seed-derived `stg_erp_PX_CAT_G1V2`.
+- `AutomationCondition.eager()` on the rest of staging (seed-based `stg_erp_CUST_AZ12` / `stg_erp_PX_CAT_G1V2`), all of mart, all of reporting cascades down per-partition.
 - Every dbt model lands with `snapshot_date = 2026-04-01` and 60,398 / 18,484 / 397 rows in the respective tables.
 
 ### Step 4 — Drop event-day files to see the daily cadence in action
@@ -129,7 +128,7 @@ cp future_landing_data/*.csv data/landing/
 You'll see (within 30 s):
 
 1. `landing_file_sensor` fires new landing runs: one daily run per `YYYY_MM_DD` triple of files found, one monthly run per `YYYY_MM` file found.
-2. `AutomationCondition.eager()` on daily-source landing models (`landing/raw_crm_cust_info`, `landing/raw_crm_sales_details`, `landing/raw_erp_LOC_A101`) auto-fires each daily partition as its upstream `raw/*` asset materializes.
+2. `AutomationCondition.eager()` on staging models fed by daily sources (`staging/stg_crm_cust_info`, `staging/stg_crm_sales_details`, `staging/stg_erp_LOC_A101`) auto-fires each daily partition as its upstream `raw/*` Python asset materializes.
 3. `cross_partition_sensor` ticks, sees the new daily dates, and fires `mart/dim_products_history` for each new day, joining the April monthly snapshot (from `stg_crm_prd_info`) with that day's daily seed data. If you only drop daily files for May but no May monthly file, the sensor STILL fires May's `dim_products_history` partitions — using April's monthly. When May's monthly file eventually lands, subsequent May partitions switch to the May snapshot automatically.
 4. The rest of staging, mart, and reporting cascade per-partition via `AutomationCondition.eager()`.
 
@@ -194,7 +193,7 @@ LIMIT 10;
 
 **2. Per-partition row counts across the pipeline** (proves every layer is daily-partitioned and `delete+insert` replaces only the current partition — not a cumulative append):
 ```sql
-SELECT 'landing.raw_crm_sales_details' AS tbl, snapshot_date, COUNT(*) AS rows FROM landing.raw_crm_sales_details GROUP BY 1,2
+SELECT 'raw.sales_details' AS tbl, snapshot_date, COUNT(*) AS rows FROM raw.sales_details GROUP BY 1,2
 UNION ALL
 SELECT 'staging.stg_crm_sales_details', snapshot_date, COUNT(*) FROM staging.stg_crm_sales_details GROUP BY 1,2
 UNION ALL
@@ -232,16 +231,16 @@ LIMIT 15;
 | Feature | Where to find it |
 |---|---|
 | **Multi-code-location** | Deployment tab — two green locations. Asset graph stitches across them. |
-| **dbt + DuckDB** | Assets tab — `landing → staging → mart → reporting → ml_features`. Every dbt model is **daily-partitioned on `snapshot_date`**, incremental (`delete+insert` on `snapshot_date`). Dbt tests (including `dbt_utils.unique_combination_of_columns` for `(natural_key, snapshot_date)`) surface as asset checks. |
+| **dbt + DuckDB** | Assets tab — `raw_* (Python) → staging → mart → reporting → ml_features`. Every dbt model is **daily-partitioned on `snapshot_date`**, incremental (`delete+insert` on `snapshot_date`). Dbt tests (including `dbt_utils.unique_combination_of_columns` for `(natural_key, snapshot_date)`) surface as asset checks. |
 | **dbt groups & access** | `dbt_project/models/groups.yml` + `+group:`/`+access:` in `dbt_project.yml`. Staging is `access: private`, mart/reporting are `public`. |
-| **Daily partitions** | Every layer — `raw_*`, `landing/*`, `staging/*`, `mart/*`, `reporting/*`, `ml_features/*`. Partition grid on every asset. Dagster passes `--vars '{"snapshot_dt":"YYYY-MM-DD"}'` into dbt; each model filters itself on that var. |
-| **Monthly source → daily pipeline** | The monthly product source is brought into the daily grain via `raw_crm_prd_info` (which picks the latest-available monthly snapshot per partition), carried into `stg_crm_prd_info` (tagged `latest_available_source` — the dbt-side handle on the slow cadence), and bridged into the daily pipeline by `dim_products_history` (tagged `latest_available` — the first mart that crosses the cadence boundary). |
+| **Daily partitions** | Every layer — `raw_*` (Python), `staging/*`, `mart/*`, `reporting/*`, `ml_features/*`. Partition grid on every asset. Dagster passes `--vars '{"snapshot_dt":"YYYY-MM-DD"}'` into dbt; each model filters itself on that var. |
+| **Monthly source → daily pipeline** | The monthly product source lands in DuckDB via the Python asset `raw/raw_prd_info_monthly`. The dbt source `dagster_raw.prd_info` declares `meta.dagster.asset_key: ["raw", "raw_prd_info_monthly"]` so the source collapses onto that Python AssetKey — one node, not two. The staging model `stg_crm_prd_info` reads the source directly, picks the latest-available monthly snapshot on-or-before the current partition date (via an `INNER JOIN (SELECT MAX(snapshot_month))`), and carries the slow cadence forward (tagged `latest_available_source`). The first mart that bridges this slow cadence into the daily pipeline is `dim_products_history` (tagged `latest_available`). |
 | **Cross-partition bridge sensor** | `cross_partition_sensor` — tag-driven port of `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. Scans the dbt manifest for `latest_available` models and fires them daily in expansion mode so the bridging mart never stalls waiting for a monthly source update. |
 | **AutomationCondition.eager()** | Every partitioned dbt asset carries it EXCEPT models tagged `latest_available` — those are fired by `cross_partition_sensor` instead (expansion mode). Models tagged `latest_available_source` keep AC.eager() — the tag simply signals to the sensor "this is the slow-cadence handle." |
 | **Monthly partition** | `raw_prd_info_monthly` — a separate partition grid with month-start keys. |
 | **Backfills** | Click **Backfill** on any partitioned asset. Runs execute serially thanks to the `duckdb_writer` tag concurrency limit. `BackfillPolicy.multi_run()` on the dbt assets means each partition becomes its own run (visible in the runs tab). |
 | **File-arrival sensor** | `landing_file_sensor` — one sensor routes both daily AND monthly files to the right job. |
-| **Manual dbt-seed job** | `dbt_seed_job` in Jobs — seeds only (CUST_AZ12, PX_CAT_G1V2). Static reference data, unpartitioned. Downstream `raw_erp_*` + `stg_erp_*` models are partitioned — they stamp `snapshot_date` onto the seed content and cascade via AutomationCondition. |
+| **Manual dbt-seed job** | `dbt_seed_job` in Jobs — seeds only (CUST_AZ12, PX_CAT_G1V2). Static reference data, unpartitioned. Downstream `stg_erp_CUST_AZ12` / `stg_erp_PX_CAT_G1V2` staging models are partitioned — they read the seed directly and stamp `snapshot_date` onto every row per partition, cascading via AutomationCondition. |
 | **Cross-location asset sensor** | `elt_to_ml_bridge_sensor` (ml_pipelines) — listens for new partitions of `reporting.rpt_sales_summary_by_customer` in the elt_pipelines code location and fires `ml_training_job` with the same `partition_key`. |
 | **ML fan-out** | `customer_segments` (KMeans) + `churn_predictions` (LogisticRegression) both consume `customer_rfm` within a single partition. |
 | **Freshness** | Every partitioned asset carries a `FreshnessPolicy.cron(deadline_cron=..., lower_bound_delta=...)` — attached to `@asset(...)` for Python assets or via the dbt translator's `get_freshness_policy()` override. Evaluated automatically by Dagster's automation infrastructure; no separate sensor to toggle on. Open any asset → **Checks** tab → you'll see `freshness_check` with PASS / WARN / FAIL. Policies live in `elt_pipelines/constants.py` and `ml_pipelines/constants.py`, plus the translator methods in each `assets/dbt.py`. |
@@ -255,8 +254,8 @@ The project is **entirely sensor-driven** now that every layer is partitioned. S
 | Hop | Sensor | What it does |
 |---|---|---|
 | Filesystem → landing assets | `landing_file_sensor` | Detects new `<prefix>_YYYY_MM_DD.csv` / `prd_info_YYYY_MM.csv` files, emits one `RunRequest` per file with the right `partition_key` + job. |
-| landing (daily-source) | `AutomationCondition.eager()` | Landing dbt models fed by daily raw sources (`raw_crm_cust_info`, `raw_crm_sales_details`, `raw_erp_LOC_A101`) auto-fire per partition when their upstream materializes. |
-| staging | `AutomationCondition.eager()` | Every staging model (including `stg_crm_prd_info`, which is tagged `latest_available_source` to indicate it carries slow-cadence data forward) auto-fires per partition when upstream landing materializes. |
+| landing (Python) → staging | `AutomationCondition.eager()` | Staging models fed by daily raw sources (`stg_crm_cust_info`, `stg_crm_sales_details`, `stg_erp_LOC_A101`) and by seeds (`stg_erp_CUST_AZ12`, `stg_erp_PX_CAT_G1V2`) auto-fire per partition when their upstream materializes. |
+| staging (slow-cadence) | `AutomationCondition.eager()` | `stg_crm_prd_info` (tagged `latest_available_source` to indicate it carries slow-cadence monthly data) auto-fires per partition when the monthly Python asset `raw/raw_prd_info_monthly` materializes. |
 | mart / cross-cadence bridge | `cross_partition_sensor` (for `dim_products_history`) | `dim_products_history` is the first mart that joins a daily dimension (`stg_erp_PX_CAT_G1V2`) with a slow-cadence dimension (`stg_crm_prd_info`). Tagged `latest_available`. The sensor fires it daily in expansion mode even when the monthly source hasn't updated, so the daily pipeline keeps producing new rows using the latest monthly snapshot. |
 | mart / reporting (downstream of the bridge) | `AutomationCondition.eager()` | `dim_products`, `fct_sales`, `rpt_*` all auto-cascade once `dim_products_history` materializes for a partition. |
 | elt → ml (cross-code-location) | `elt_to_ml_bridge_sensor` (ml_pipelines) | Listens for new partitions of `reporting.rpt_sales_summary_by_customer`, fires `ml_training_job` with the same `partition_key`. Turn it **off** to stop the ml chain while elt keeps running. |
@@ -297,7 +296,6 @@ Because `FreshnessPolicy` is not a check step, **no materialization job includes
 |---|---|
 | `raw_sales_details`, `raw_cust_info`, `raw_loc_a101` (daily Python landings) | 9am every day |
 | `raw_prd_info_monthly` (monthly Python landing) | 9am on the 2nd of each month |
-| `landing/*` (dbt) | 9am every day |
 | `staging/*`, `mart/*`, `reporting/*` (dbt) | 10am every day |
 | `ml_features/*` (dbt + Python) | 11am every day |
 
@@ -318,7 +316,7 @@ Tune them up or down to match what "fresh enough" means for your pipeline. No se
 - **One dbt project** at repo root. Each code location loads a different selector (elt takes everything except `ml_features`; ml takes only `ml_features`). Groups (`elt_team`, `ml_team`) + `+access:` settings enforce boundaries at the dbt layer.
 - **`@dbt_assets` per code location** — not `load_assets_from_dbt_project`. The manifest is produced inside each container at startup with a per-container `--target-path` so the two containers don't race on the same `target/` folder.
 - **Daily partitioning everywhere** — every dbt model is `materialized='incremental'` with `unique_key='snapshot_date'` and `incremental_strategy='delete+insert'`. Dagster reads `context.partition_time_window.start` and passes the partition date into dbt as `--vars '{"snapshot_dt":"YYYY-MM-DD"}'`. Each model then filters its own upstreams by that var. This is the pattern used in production Dagster/dbt projects (see the reference implementation at `imp_finance_mart`) — each partition holds the state of the world for that one day, and re-running a partition replaces only its own rows.
-- **Split `@dbt_assets` blocks** — the partitioned block contains ALL 6 landing dbt models (including the seed-stamping `raw_erp_*`) + all staging + mart + reporting. The seed-only block contains just the two dbt seeds (CUST_AZ12, PX_CAT_G1V2), materialized once via `dbt_seed_job`.
+- **Split `@dbt_assets` blocks** — the partitioned block contains all of staging + mart + reporting. The seed-only block contains just the two dbt seeds (CUST_AZ12, PX_CAT_G1V2), materialized once via `dbt_seed_job`. There is no separate "dbt landing" layer — the Python-owned `raw/*` assets ARE the landing, and dbt sources in `models/sources.yml` declare `meta.dagster.asset_key` so each source collapses onto its matching Python landing AssetKey. Staging reads the source directly.
 - **Slow-cadence source → daily pipeline** — the monthly product source carries its cadence into dbt via `stg_crm_prd_info` (tagged `latest_available_source`). The first mart that bridges it into the daily grain is `dim_products_history` (tagged `latest_available`), which joins the slow-cadence stg with a daily seed-derived dim (`stg_erp_PX_CAT_G1V2`). `cross_partition_sensor` fires `dim_products_history` daily in expansion mode so the daily pipeline keeps producing new mart rows even while the monthly source hasn't updated. A daily run on 2026-04-15 uses the 2026-04-01 monthly product snapshot; on 2026-05-15 it picks 2026-05-01 as soon as that monthly file lands.
 - **dbt_utils for compound uniqueness tests** — since every natural key (customer_id, product_id, …) appears once per partition, `(natural_key, snapshot_date)` is the real uniqueness constraint. We use `dbt_utils.unique_combination_of_columns` for that instead of plain `unique`. Tests surface in the Dagster UI as asset checks.
 - **ML assets partitioned too** — `customer_segments` and `churn_predictions` are daily assets with the same `delete+insert` semantics as the dbt side. The joblib artifact file is partition-stamped (`churn_model_YYYY-MM-DD.joblib`) so you can see a fresh artifact per partition without overwriting yesterday's.
@@ -342,9 +340,10 @@ Tune them up or down to match what "fresh enough" means for your pipeline. No se
 - **Freshness stuck / not updating** — Freshness is implemented via `FreshnessPolicy` attached to assets (not as a separate check step). Make sure `default_automation_condition_sensor` is on — that's what evaluates freshness and surfaces PASS/WARN/FAIL on the Checks tab. There is no separate freshness sensor to toggle.
 - **Monthly partition rejected** — `MonthlyPartitionsDefinition` uses `end_offset=1` so the current month is valid; if you change `start_date`, make sure your file's month is within the supported range.
 - **"dbt found N package(s) specified in packages.yml, but only 0 package(s) installed in dbt_packages"** — happens right after `reset-demo` because that script wipes `dbt_packages/`. The code-location containers run `dbt deps` on startup if `dbt_packages/dbt_utils/` is missing; give it a few seconds and it self-heals. If it persists, `make down && make up` forces a fresh startup sequence.
-- **"Binder Error: Cannot compare values of type VARCHAR and type DATE"** — means a Dagster-landed raw table has `snapshot_date` as VARCHAR but the dbt model is comparing it to a DATE. Every landing dbt model now does `snapshot_date::DATE` in both the SELECT and the WHERE; if you add a new source, follow that pattern.
+- **"Binder Error: Cannot compare values of type VARCHAR and type DATE"** — means a Dagster-landed raw table has `snapshot_date` as VARCHAR but the dbt model is comparing it to a DATE. Every staging dbt model does `snapshot_date::DATE AS snapshot_date` in the SELECT and `snapshot_date::DATE = '{{ var(...) }}'::DATE` in the WHERE; if you add a new source or staging model, follow that pattern.
 - **Backfill produces a run per partition but they all queue** — expected: `duckdb_writer` concurrency limit is 1 so runs serialize. Backfills of many partitions take time linearly; switch to a real warehouse to parallelize.
 - **Fresh slate** — `make reset-demo` stops the stack and returns the repo to a just-cloned state (see "Keeping the repo clean for the next person"). For a lighter wipe that keeps landing files, use `make wipe`.
+- **`AutomationCondition.eager()` 365-day lookback window** — the per-layer AutomationCondition in `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py` is composed as `eager().without(in_latest_time_window()) & in_latest_time_window(lookback_delta=timedelta(days=365))`. That lookback is calibrated for day-1 = **2026-04-01** and is intentionally wide so the demo can be replayed throughout the year without the cascade stalling on "out-of-window" partitions. **This window expires on 2027-04-27** (365 days past today). If you replay this demo past that date — or you want to simulate partitions older than a year — open `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py`, find the `eager_with_lookback` block inside `EltDbtTranslator.get_automation_condition`, and bump `timedelta(days=365)` to a larger value. In production you'd usually go the other way (48-96h) since only the last few days are ever in play; the wide window is a demo-only convenience.
 
 ---
 
@@ -450,7 +449,7 @@ We replace three real components with cheaper stand-ins so the whole thing runs 
 - Every Dagster pattern (code locations, partitioned assets, sensors, partitioned jobs, asset checks, freshness checks).
 - Daily `delete+insert` incremental dbt models with `snapshot_date` as the partition watermark — exactly how a real Snowflake/BigQuery ELT is structured.
 - The `--vars snapshot_dt` plumbing: Dagster reads `context.partition_time_window.start` and hands it to dbt; every model filters on `{{ var("snapshot_dt") }}`.
-- The latest-available-on-or-before pattern for monthly-into-daily joins (in `raw_crm_prd_info`'s SQL filter).
+- The latest-available-on-or-before pattern for monthly-into-daily joins (in `stg_crm_prd_info`'s SQL filter).
 - Cadence-bridging via tag-driven `cross_partition_sensor`: `stg_crm_prd_info` tagged `latest_available_source`, `dim_products_history` tagged `latest_available`. Mirrors how `imp_finance_mart` coordinates daily marts against slow-cadence staging models.
 - The dbt project structure and group-based access boundaries.
 
