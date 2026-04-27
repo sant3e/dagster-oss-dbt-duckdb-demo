@@ -92,9 +92,12 @@ The `future_landing_data/` folder is **empty by default** (it only ships with a 
 
 First-time prereq (one-off):
 ```bash
-pip install faker
-# on macOS with PEP-668 protections:
-pip install --break-system-packages faker
+# Recommended — works regardless of which pip your shell picks up:
+python3 -m pip install --break-system-packages faker
+
+# If that's rejected by PEP 668 without the flag, the --break-system-packages
+# is required on modern Homebrew/macOS Python installs.
+# If you use pyenv/conda/venv, drop the flag.
 ```
 
 Generate a few days of event snapshots:

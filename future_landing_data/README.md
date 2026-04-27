@@ -36,9 +36,10 @@ Then:
 
 Prereq:
 ```bash
-pip install faker                    # if not already available
-# or if you hit PEP-668 on macOS:
-pip install --break-system-packages faker
+# Recommended — guarantees pip installs into the same interpreter
+# that `python3` resolves to (avoids the classic Homebrew situation
+# where `pip` and `python3` target different versions):
+python3 -m pip install --break-system-packages faker
 ```
 
 The generator takes CLI arguments:
