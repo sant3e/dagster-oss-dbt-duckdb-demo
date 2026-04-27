@@ -194,7 +194,23 @@ def _layer_from_dbt_path(p: str) -> Optional[str]:
 
 
 def _asset_key_from_dbt_node(manifest: dict, node_id: str) -> AssetKey:
-    """Mirror EltDbtTranslator.get_asset_key so the sensor picks the same keys."""
+    """Mirror EltDbtTranslator.get_asset_key so the sensor picks the same keys.
+
+    Handles BOTH manifest['nodes'] (models + seeds) and manifest['sources']
+    (dbt sources). The former resolves to layer-prefixed AssetKeys; the
+    latter resolves to the Dagster asset that Dagster-owned landings populate
+    (e.g. source 'dagster_raw.prd_info' → AssetKey(['raw', 'raw_prd_info_monthly'])).
+    """
+    if node_id in manifest.get("sources", {}):
+        src = manifest["sources"][node_id]
+        # Source name alone isn't enough to derive the Dagster-side asset key
+        # (dbt source 'prd_info' is populated by raw/raw_prd_info_monthly).
+        # Fall back to a placeholder that's not used for Dagster-instance
+        # lookups — the sensor only uses this for logging when the dep is a
+        # source. Per-source overrides live in _SOURCE_TO_DAGSTER_ASSET.
+        return _SOURCE_TO_DAGSTER_ASSET.get(
+            node_id, AssetKey([src.get("source_name", "source"), src.get("name", "")])
+        )
     node = manifest["nodes"][node_id]
     name = node.get("name")
     if node.get("resource_type") == "seed":
@@ -205,19 +221,43 @@ def _asset_key_from_dbt_node(manifest: dict, node_id: str) -> AssetKey:
     return AssetKey([name])
 
 
+# Map dbt source IDs → the Dagster AssetKey of the asset that populates them.
+# Needed because dbt sources carry no layer info and the sensor queries the
+# Dagster instance for materialized partitions, which is keyed by AssetKey.
+_SOURCE_TO_DAGSTER_ASSET: Dict[str, AssetKey] = {
+    "source.dbt_oss_template.dagster_raw.prd_info": AssetKey(["raw", "raw_prd_info_monthly"]),
+    "source.dbt_oss_template.dagster_raw.sales_details": AssetKey(["raw", "raw_sales_details"]),
+    "source.dbt_oss_template.dagster_raw.cust_info": AssetKey(["raw", "raw_cust_info"]),
+    "source.dbt_oss_template.dagster_raw.loc_a101": AssetKey(["raw", "raw_loc_a101"]),
+}
+
+
+def _get_node_or_source(manifest: dict, node_id: str) -> Optional[dict]:
+    """Return the dbt manifest entry for a node_id, checking both models and sources."""
+    if node_id in manifest.get("nodes", {}):
+        return manifest["nodes"][node_id]
+    if node_id in manifest.get("sources", {}):
+        return manifest["sources"][node_id]
+    return None
+
+
 def get_asset_dependencies_with_keys(
     manifest: dict, node_id: str
 ) -> Dict[str, List[Tuple[str, AssetKey]]]:
     """Classify a node's direct deps into exact_match vs latest_available.
 
-    Faithful port of imp_finance_mart's get_asset_dependencies_with_keys.
+    Faithful port of imp_finance_mart's get_asset_dependencies_with_keys,
+    extended to recognize dbt SOURCES (not just models) tagged
+    `latest_available_source`. This matters here because the slow-cadence
+    asset in our setup is a Dagster-owned landing (raw_prd_info_monthly),
+    which appears in the manifest as a dbt source, not a dbt model.
     """
     node = manifest["nodes"][node_id]
     exact: List[Tuple[str, AssetKey]] = []
     latest: List[Tuple[str, AssetKey]] = []
 
     for dep_id in node.get("depends_on", {}).get("nodes", []):
-        dep_node = manifest["nodes"].get(dep_id) if dep_id in manifest["nodes"] else None
+        dep_node = _get_node_or_source(manifest, dep_id)
         if dep_node is None:
             continue
         dep_name = dep_node.get("name")
