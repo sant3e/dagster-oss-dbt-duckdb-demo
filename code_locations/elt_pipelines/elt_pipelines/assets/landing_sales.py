@@ -8,7 +8,7 @@ from dagster_duckdb import DuckDBResource
 from elt_pipelines.assets._landing_shared import land_daily_csv
 from elt_pipelines.constants import (
     DUCKDB_WRITER_TAGS,
-    FILENAME_PREFIXES,
+    FILENAME_PREFIXES_DAILY,
     GROUP_LANDING,
 )
 from elt_pipelines.partitions import daily_partitions
@@ -33,6 +33,6 @@ def raw_sales_details(context: AssetExecutionContext, duckdb: DuckDBResource) ->
         context=context,
         duckdb=duckdb,
         landing_dir=landing_dir,
-        filename_prefix=FILENAME_PREFIXES["sales_details"],
+        filename_prefix=FILENAME_PREFIXES_DAILY["sales_details"],
         table_name="sales_details",
     )
