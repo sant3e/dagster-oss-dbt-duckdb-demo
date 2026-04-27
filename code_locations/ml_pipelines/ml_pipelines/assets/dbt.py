@@ -76,7 +76,7 @@ translator = MlDbtTranslator(
 
 @dbt_assets(
     manifest=dbt_project.manifest_path,
-    select="path:models/ml_features",
+    select="fqn:dbt_oss_template.ml_features.*",
     dagster_dbt_translator=translator,
     op_tags={"dagster/concurrency_key": "duckdb_writer"},
     retry_policy=_TRANSIENT_LOCK_RETRY,
