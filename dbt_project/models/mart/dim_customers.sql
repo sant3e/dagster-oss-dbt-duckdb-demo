@@ -6,12 +6,44 @@
     )
 }}
 
--- Customer dimension for the current partition. Merges CRM staging
--- (daily landing) with ERP reference (seeded, now daily-partitioned via
--- raw_erp_CUST_AZ12) and location master (daily landing).
--- `customer_key` is a surrogate generated within the partition; downstream
--- fact joins always co-filter on snapshot_date so keys only need to be
--- consistent within a single partition.
+-- Customer dimension for the current partition.
+--
+-- Event-style staging contract: stg_crm_cust_info emits ONLY rows that
+-- changed on a given day (new customers + marital-status flips). So
+-- filtering staging to `snapshot_date = current_partition` alone would
+-- yield only today's events — for day-2/day-3 that is 8–13 rows and
+-- downstream fact joins on `customer_key = customer_key` would lose
+-- every historical customer.
+--
+-- To build the full customer universe as-of the current partition,
+-- pick the LATEST row per `cst_id` across all staging partitions with
+-- `snapshot_date <= current_partition`. Same carry-forward pattern for
+-- stg_erp_LOC_A101 (event-style: day-2/day-3 contain only country-move
+-- events; historical rows live on day-1). stg_erp_CUST_AZ12 is seed-fed
+-- so every partition carries the full universe — filter to current is OK.
+WITH latest_cust AS (
+    SELECT *
+    FROM (
+        SELECT
+            cst_id, cst_key, cst_firstname, cst_lastname,
+            cst_marital_status, cst_gndr, cst_create_date, snapshot_date,
+            ROW_NUMBER() OVER (PARTITION BY cst_id ORDER BY snapshot_date DESC) AS rn
+        FROM {{ ref('stg_crm_cust_info') }}
+        WHERE snapshot_date <= '{{ var("snapshot_dt") }}'::DATE
+    ) t
+    WHERE rn = 1
+),
+latest_loc AS (
+    SELECT *
+    FROM (
+        SELECT
+            cid, cntry, snapshot_date,
+            ROW_NUMBER() OVER (PARTITION BY cid ORDER BY snapshot_date DESC) AS rn
+        FROM {{ ref('stg_erp_LOC_A101') }}
+        WHERE snapshot_date <= '{{ var("snapshot_dt") }}'::DATE
+    ) t
+    WHERE rn = 1
+)
 SELECT
     ROW_NUMBER() OVER (ORDER BY ci.cst_id) AS customer_key,
     ci.cst_id AS customer_id,
@@ -27,13 +59,11 @@ SELECT
     ) AS gender,
     ca.bdate AS birth_date,
     ci.cst_create_date AS create_date,
-    ci.snapshot_date AS snapshot_date,
+    '{{ var("snapshot_dt") }}'::DATE AS snapshot_date,
     CURRENT_TIMESTAMP AS dwh_create_date
-FROM {{ ref('stg_crm_cust_info') }} ci
+FROM latest_cust ci
 LEFT JOIN {{ ref('stg_erp_CUST_AZ12') }} ca
     ON ci.cst_key = ca.cid
-    AND ca.snapshot_date = ci.snapshot_date
-LEFT JOIN {{ ref('stg_erp_LOC_A101') }} la
+    AND ca.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
+LEFT JOIN latest_loc la
     ON ci.cst_key = la.cid
-    AND la.snapshot_date = ci.snapshot_date
-WHERE ci.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
