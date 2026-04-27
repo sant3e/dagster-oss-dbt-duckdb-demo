@@ -111,7 +111,7 @@ class EltDbtTranslator(DagsterDbtTranslator):
         EXCEPT those tagged `latest_available` — those are fired by the
         cross_partition_sensor in expansion mode.
 
-        Two modifications to the default `AutomationCondition.eager()`:
+        Three modifications to the default `AutomationCondition.eager()`:
 
         1. `.without(in_latest_time_window())` — `eager()` by default
            only fires assets within today's time window, which would
@@ -119,15 +119,15 @@ class EltDbtTranslator(DagsterDbtTranslator):
            2026-04-27. Strip that restriction so any materialized
            upstream partition cascades regardless of age.
 
-        2. `| AutomationCondition.missing()` — `eager()`'s default
+        2. `| (missing() & ~any_deps_missing())` — `eager()`'s default
            firing rule is cursor-based (`any_deps_updated` relative to
            when the sensor last ticked). If upstreams were materialized
            BEFORE the sensor turned on, eager() treats them as "already
-           handled" and won't fire downstream. Adding `missing()`
-           guarantees any partition that simply doesn't exist yet will
-           fire whenever its deps become available, regardless of
-           cursor state — so the cascade self-bootstraps on first
-           enable without needing a manual re-materialization.
+           handled" and won't fire downstream. Adding `missing()` with
+           a `~any_deps_missing()` guard means: fire any partition that
+           doesn't exist yet, but ONLY when all upstream deps ARE
+           materialized. This keeps the cascade self-bootstrapping
+           without firing an asset whose parents aren't ready.
 
         Seeds and `latest_available` assets return None.
         """
@@ -140,7 +140,10 @@ class EltDbtTranslator(DagsterDbtTranslator):
             AutomationCondition.eager().without(
                 AutomationCondition.in_latest_time_window()
             )
-            | AutomationCondition.missing()
+            | (
+                AutomationCondition.missing()
+                & ~AutomationCondition.any_deps_missing()
+            )
         )
 
     def get_freshness_policy(self, dbt_resource_props):
