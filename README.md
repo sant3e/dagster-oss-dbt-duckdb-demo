@@ -86,9 +86,11 @@ These populate `raw.sales_details`, `raw.cust_info`, `raw.loc_a101`, `raw.prd_in
 
 ### Step 3 — Watch the cascade self-propagate via AutomationCondition + the cross-partition sensor
 
-Turn on Dagster's built-in **`default_automation_condition_sensor`** (Automation → Sensors). This sensor evaluates `AutomationCondition.eager()` rules, which are attached to every partitioned asset downstream of landing EXCEPT the two that are tagged for sensor-gated handling (more below).
+Turn on Dagster's built-in **`default_automation_condition_sensor`** (Automation → Sensors). This sensor evaluates `AutomationCondition.eager()` rules, which are attached to every partitioned asset downstream of landing EXCEPT the one tagged `latest_available` (`dim_products_history`, which is sensor-gated).
 
 Turn on **`cross_partition_sensor`** too. This is a tag-driven sensor ported from [`imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`]. It reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source` dbt model) and fires one RunRequest per day in expansion mode — so the mart keeps materializing daily even while the underlying monthly source hasn't updated, reusing the latest monthly snapshot until a newer one arrives.
+
+**Optionally**, turn on the freshness sensors in each code location — `freshness_checks_sensor` in `elt_pipelines` AND in `ml_pipelines`. They evaluate the partition-freshness checks on an hourly schedule, **out-of-band** from any materialization run, and write PASS / WARN / FAIL results to each asset's **Checks** tab. Leave them off if you don't care about freshness state during the demo; nothing breaks.
 
 With both sensors on, partition `2026-04-01` cascades automatically end-to-end:
 - `raw/*` landings already materialized (Step 2).
@@ -242,13 +244,13 @@ LIMIT 15;
 | **Manual dbt-seed job** | `dbt_seed_job` in Jobs — seeds only (CUST_AZ12, PX_CAT_G1V2). Static reference data, unpartitioned. Downstream `raw_erp_*` + `stg_erp_*` models are partitioned — they stamp `snapshot_date` onto the seed content and cascade via AutomationCondition. |
 | **Cross-location asset sensor** | `elt_to_ml_bridge_sensor` (ml_pipelines) — listens for new partitions of `reporting.rpt_sales_summary_by_customer` in the elt_pipelines code location and fires `ml_training_job` with the same `partition_key`. |
 | **ML fan-out** | `customer_segments` (KMeans) + `churn_predictions` (LogisticRegression) both consume `customer_rfm` within a single partition. |
-| **Freshness checks** | Every partitioned asset has a time-partition freshness check (deadline_cron driven). Open any asset → **Checks** tab → you'll see a `freshness_check` row with PASS / WARN / FAIL. Thresholds live in `freshness_checks.py` in each code location. |
+| **Freshness checks** | Every partitioned asset has a time-partition freshness check (deadline_cron driven). Evaluated by a dedicated `freshness_checks_sensor` (one per code location) that runs **out-of-band** from materialization jobs — so a run never shows a red freshness step inline. Toggle the sensor on to see PASS / WARN / FAIL on each asset's **Checks** tab. Thresholds live in `freshness_checks.py` in each code location. |
 
 ---
 
 ## Sensor-driven orchestration — one layer at a time
 
-The project is **entirely sensor-driven** now that every layer is partitioned. Three sensors form a cascade, each one bridging a different hop in the graph:
+The project is **entirely sensor-driven** now that every layer is partitioned. Sensors form a cascade, each one bridging a different hop in the graph:
 
 | Hop | Sensor | What it does |
 |---|---|---|
@@ -258,6 +260,7 @@ The project is **entirely sensor-driven** now that every layer is partitioned. T
 | mart / cross-cadence bridge | `cross_partition_sensor` (for `dim_products_history`) | `dim_products_history` is the first mart that joins a daily dimension (`stg_erp_PX_CAT_G1V2`) with a slow-cadence dimension (`stg_crm_prd_info`). Tagged `latest_available`. The sensor fires it daily in expansion mode even when the monthly source hasn't updated, so the daily pipeline keeps producing new rows using the latest monthly snapshot. |
 | mart / reporting (downstream of the bridge) | `AutomationCondition.eager()` | `dim_products`, `fct_sales`, `rpt_*` all auto-cascade once `dim_products_history` materializes for a partition. |
 | elt → ml (cross-code-location) | `elt_to_ml_bridge_sensor` (ml_pipelines) | Listens for new partitions of `reporting.rpt_sales_summary_by_customer`, fires `ml_training_job` with the same `partition_key`. Turn it **off** to stop the ml chain while elt keeps running. |
+| Freshness evaluation (each code location) | `freshness_checks_sensor` (one per code location) | Evaluates every partition-freshness check on an hourly tick, OUT-OF-BAND from materialization jobs. Writes PASS / WARN / FAIL to each asset's Checks tab. Optional — leave off if you don't care about freshness during the demo. |
 
 Each sensor is independently togglable. Turn off the ml bridge to stop the ml chain from auto-firing while elt keeps running. Turn off the elt bridge to stop the elt chain from auto-firing while landing keeps ingesting. That's the "layered sensor" pattern: every boundary between responsibilities is an explicit, disablable gate.
 
@@ -274,9 +277,17 @@ Earlier versions of this template used `AutomationCondition.eager()` on mart mod
 
 ## Freshness — how stale is each asset?
 
-Freshness checks surface "this asset hasn't been refreshed recently enough" as a first-class asset check. Every partitioned asset in this project has one attached.
+Freshness checks surface "this asset hasn't been refreshed recently enough" as a first-class asset check. Every partitioned asset in this project has one attached, and they're all evaluated by a dedicated sensor, out-of-band from any materialization run.
 
-**Where to look in the UI:** click any asset → **Checks** tab. You'll see a `freshness_check` row with one of:
+**How it works:**
+
+- `build_time_partition_freshness_checks(...)` in each code location's `freshness_checks.py` creates the checks.
+- `build_sensor_for_freshness_checks(freshness_checks=...)` builds a sensor named `freshness_checks_sensor` that evaluates them on an hourly tick.
+- Materialization jobs (`landing_daily_job`, `dbt_seed_job`, `ml_training_job`, etc.) **do NOT include the freshness checks** — they run clean green without freshness steps.
+
+This is the canonical Dagster 1.12 pattern (see [data-freshness-testing.md](https://docs.dagster.io/guides/test/data-freshness-testing)): *"It is critical to pair these checks with a schedule or sensor using build_sensor_for_freshness_checks to ensure they execute independently of asset materialization."*
+
+**Where to look in the UI:** turn on `freshness_checks_sensor` in Automation → Sensors (once in each code location), then open any partitioned asset → **Checks** tab. You'll see a `freshness_check` row with one of:
 
 - ✅ **PASS** — the expected partition has been materialized before its deadline.
 - ⚠️ **WARN** — partition is approaching the deadline.
@@ -297,7 +308,7 @@ Every partitioned asset in both code locations uses `build_time_partition_freshn
 - `code_locations/elt_pipelines/elt_pipelines/freshness_checks.py`
 - `code_locations/ml_pipelines/ml_pipelines/freshness_checks.py`
 
-Tune them up or down to match what "fresh enough" means for your pipeline. Freshness checks are evaluated by Dagster's `default_automation_condition_sensor`, so just make sure that sensor is on (see Step 3).
+Tune them up or down to match what "fresh enough" means for your pipeline. Toggle `freshness_checks_sensor` on in each code location to start evaluating (it ships in `default_status=STOPPED`).
 
 ---
 
@@ -329,6 +340,7 @@ Tune them up or down to match what "fresh enough" means for your pipeline. Fresh
 - **"Code location failed to load"** — Check `docker compose logs <location>` for import errors. Most common cause: a stale `manifest.json`. Restart the offending container or rebuild (`make build`).
 - **"database is locked"** — Another process holds a DuckDB writer. Check `make ps`; confirm only one writer asset runs at a time (the `duckdb_writer` concurrency key should prevent this). For interactive queries use `duckdb -readonly`.
 - **Sensor not firing** — From the UI, confirm the sensor is toggled on (they are all OFF by default for local dev).
+- **Freshness checks stuck / never run** — Freshness is evaluated only by the dedicated `freshness_checks_sensor` (one in each code location, both OFF by default). Turn them on in Automation → Sensors. Don't expect `default_automation_condition_sensor` to evaluate freshness — it drives AC.eager() propagation, not freshness.
 - **Monthly partition rejected** — `MonthlyPartitionsDefinition` uses `end_offset=1` so the current month is valid; if you change `start_date`, make sure your file's month is within the supported range.
 - **"dbt found N package(s) specified in packages.yml, but only 0 package(s) installed in dbt_packages"** — happens right after `reset-demo` because that script wipes `dbt_packages/`. The code-location containers run `dbt deps` on startup if `dbt_packages/dbt_utils/` is missing; give it a few seconds and it self-heals. If it persists, `make down && make up` forces a fresh startup sequence.
 - **"Binder Error: Cannot compare values of type VARCHAR and type DATE"** — means a Dagster-landed raw table has `snapshot_date` as VARCHAR but the dbt model is comparing it to a DATE. Every landing dbt model now does `snapshot_date::DATE` in both the SELECT and the WHERE; if you add a new source, follow that pattern.

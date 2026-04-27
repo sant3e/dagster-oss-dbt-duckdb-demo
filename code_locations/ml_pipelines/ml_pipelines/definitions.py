@@ -3,7 +3,7 @@
 from dagster import Definitions
 
 from ml_pipelines.assets import churn, dbt as dbt_assets_module, segmentation
-from ml_pipelines.freshness_checks import all_freshness_checks
+from ml_pipelines.freshness_checks import all_freshness_checks, freshness_checks_sensor
 from ml_pipelines.jobs import all_jobs
 from ml_pipelines.resources import build_resources
 from ml_pipelines.sensors import elt_to_ml_bridge_sensor
@@ -16,6 +16,6 @@ defs = Definitions(
     ],
     asset_checks=all_freshness_checks,
     jobs=all_jobs,
-    sensors=[elt_to_ml_bridge_sensor],
+    sensors=[elt_to_ml_bridge_sensor, freshness_checks_sensor],
     resources=build_resources(),
 )

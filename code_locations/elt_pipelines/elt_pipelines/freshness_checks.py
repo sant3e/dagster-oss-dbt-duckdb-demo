@@ -5,13 +5,28 @@ a check fails if the latest expected partition isn't materialized by
 `deadline_cron`. Demo-friendly thresholds — in production you'd tie
 these to real SLAs.
 
-`default_automation_condition_sensor` evaluates freshness checks on its
-30s tick, so turning that sensor on is enough to surface freshness
-results in the UI.
+Evaluated by a dedicated `freshness_checks_sensor` built via
+`build_sensor_for_freshness_checks`. That sensor runs the checks
+OUT-OF-BAND from asset materialization jobs — so a user-triggered
+materialization or backfill never includes a freshness-check step
+inline and can never show red for freshness. Per Dagster 1.12 docs
+(data-freshness-testing.md): "It is critical to pair these checks
+with a schedule or sensor using build_sensor_for_freshness_checks to
+ensure they execute independently of asset materialization."
+
+Note: `.without_checks()` on an AssetSelection does NOT reliably strip
+these `AssetChecksDefinition` objects when they're attached via
+`Definitions(asset_checks=...)` — that kwarg only affects checks
+declared inline on @asset(check_specs=...). The dedicated sensor is
+the canonical pattern.
+
+The freshness_checks_sensor ships with default_status=STOPPED — toggle
+it on in the Automation tab to start evaluating freshness.
 """
 
 from dagster import (
     AssetKey,
+    build_sensor_for_freshness_checks,
     build_time_partition_freshness_checks,
 )
 
@@ -80,3 +95,11 @@ all_freshness_checks = [
     *mart_freshness,
     *reporting_freshness,
 ]
+
+# Dedicated sensor that evaluates the freshness checks on a schedule,
+# independent of any materialization job. Ships stopped by default —
+# user toggles it on in Automation → Sensors.
+freshness_checks_sensor = build_sensor_for_freshness_checks(
+    freshness_checks=all_freshness_checks,
+    minimum_interval_seconds=3600,  # hourly
+)

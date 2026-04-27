@@ -36,7 +36,7 @@ landing_daily_job = define_asset_job(
         ["raw", "raw_sales_details"],
         ["raw", "raw_cust_info"],
         ["raw", "raw_loc_a101"],
-    ).without_checks(),
+    ),
     tags=DUCKDB_WRITER_TAGS,
     description="Runs the three daily-partitioned landing assets. Useful for backfills.",
 )
@@ -45,7 +45,7 @@ landing_monthly_job = define_asset_job(
     name="landing_monthly_job",
     selection=AssetSelection.keys(
         ["raw", "raw_prd_info_monthly"],
-    ).without_checks(),
+    ),
     tags=DUCKDB_WRITER_TAGS,
     description="Runs the monthly-partitioned product-master landing asset.",
 )
@@ -57,7 +57,7 @@ dbt_seed_job = define_asset_job(
     selection=AssetSelection.keys(
         AssetKey(["seeds", "CUST_AZ12"]),
         AssetKey(["seeds", "PX_CAT_G1V2"]),
-    ).without_checks(),
+    ),
     tags=DUCKDB_WRITER_TAGS,
     description=(
         "Materializes the two dbt seeds (CUST_AZ12, PX_CAT_G1V2). "
@@ -78,7 +78,7 @@ dbt_elt_landing_job = define_asset_job(
         AssetKey(["landing", "raw_erp_LOC_A101"]),
         AssetKey(["landing", "raw_erp_CUST_AZ12"]),
         AssetKey(["landing", "raw_erp_PX_CAT_G1V2"]),
-    ).without_checks(),
+    ),
     partitions_def=daily_partitions,
     tags=DUCKDB_WRITER_TAGS,
     description=(

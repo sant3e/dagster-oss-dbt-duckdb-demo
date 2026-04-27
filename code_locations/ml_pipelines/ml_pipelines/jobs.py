@@ -15,7 +15,7 @@ ml_training_job = define_asset_job(
         AssetKey(["ml_features", "customer_rfm"]),
         AssetKey(["ml_features", "customer_segments"]),
         AssetKey(["ml_features", "churn_predictions"]),
-    ).without_checks(),
+    ),
     partitions_def=daily_partitions,
     tags=DUCKDB_WRITER_TAGS,
     description=(
