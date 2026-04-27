@@ -137,7 +137,7 @@ Toggle **`elt_to_ml_bridge_sensor`** on in the `ml_pipelines` code location.
 
 Within 30s of each elt partition finishing, the sensor reads the new `reporting.rpt_sales_summary_by_customer` partition and fires `ml_training_job` for the same partition. `ml_features/customer_rfm` → `ml_features/customer_segments` → `ml_features/churn_predictions` all materialize.
 
-Leave it on for the demo. Turn it **off** only when you want to pause ml while elt keeps flowing — e.g. debugging an issue in the ml code, an upstream data quality problem you've spotted in elt that shouldn't propagate into ml, a planned ml-side release freeze, or if ml is expensive and you're iterating on elt without needing new predictions yet. Flipping it back on resumes ml, which catches up on every reporting partition that accumulated while it was off.
+Leave it on for the demo. Turn it **off** only when you want to prevent `elt_automation_condition_sensor` + `ml_automation_condition_sensor` from auto-materializing ml assets in the `ml_pipelines` code location on new reporting partitions — e.g. debugging an issue in the ml code, an upstream data quality problem you've spotted in elt that shouldn't propagate into ml, a planned ml-side release freeze, or if ml is expensive and you're iterating on elt without needing new predictions yet. With the bridge off, elt's own AC sensor keeps cascading landing → staging → mart → reporting as usual; only the ml chain stays paused. Flipping it back on resumes ml, which catches up on every reporting partition that accumulated while it was off.
 
 ---
 
