@@ -25,7 +25,11 @@ from dagster_duckdb import DuckDBResource
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
-from ml_pipelines.constants import DUCKDB_WRITER_TAGS, TRANSIENT_LOCK_RETRY_POLICY
+from ml_pipelines.constants import (
+    DUCKDB_WRITER_TAGS,
+    FRESHNESS_ML_DAILY,
+    TRANSIENT_LOCK_RETRY_POLICY,
+)
 from ml_pipelines.partitions import daily_partitions
 
 CHURN_RECENCY_THRESHOLD_DAYS = 90
@@ -46,6 +50,7 @@ CHURN_RECENCY_THRESHOLD_DAYS = 90
     partitions_def=daily_partitions,
     op_tags=DUCKDB_WRITER_TAGS,
     retry_policy=TRANSIENT_LOCK_RETRY_POLICY,
+    freshness_policy=FRESHNESS_ML_DAILY,
 )
 def churn_predictions(context: AssetExecutionContext, duckdb: DuckDBResource) -> None:
     partition_key = context.partition_key  # "YYYY-MM-DD"

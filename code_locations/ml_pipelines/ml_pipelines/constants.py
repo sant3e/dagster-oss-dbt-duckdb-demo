@@ -1,6 +1,8 @@
 """Shared constants for ml_pipelines (mirror of elt_pipelines.constants)."""
 
-from dagster import Backoff, Jitter, RetryPolicy
+from datetime import timedelta
+
+from dagster import Backoff, FreshnessPolicy, Jitter, RetryPolicy
 
 DUCKDB_WRITER_CONCURRENCY_KEY = "duckdb_writer"
 DUCKDB_WRITER_TAGS = {"dagster/concurrency_key": DUCKDB_WRITER_CONCURRENCY_KEY}
@@ -12,4 +14,11 @@ TRANSIENT_LOCK_RETRY_POLICY = RetryPolicy(
     delay=2,
     backoff=Backoff.EXPONENTIAL,
     jitter=Jitter.PLUS_MINUS,
+)
+
+# Freshness policy for ML outputs — daily, deadline 11am (an hour after
+# elt's 10am deadline so the ml chain has time to run after reporting).
+# Pure metadata; does not inject check steps into materialization runs.
+FRESHNESS_ML_DAILY = FreshnessPolicy.cron(
+    deadline_cron="0 11 * * *", lower_bound_delta=timedelta(hours=24)
 )

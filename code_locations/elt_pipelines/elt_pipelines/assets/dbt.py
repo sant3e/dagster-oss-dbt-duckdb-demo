@@ -29,6 +29,7 @@ the ml chain stops firing while elt keeps running.
 
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from dagster import (
@@ -36,6 +37,7 @@ from dagster import (
     AssetKey,
     AutomationCondition,
     BackfillPolicy,
+    FreshnessPolicy,
 )
 from dagster_dbt import (
     DagsterDbtTranslator,
@@ -69,10 +71,23 @@ def _layer_from_path(original_file_path: str) -> str | None:
     return None
 
 
+# Freshness policies per layer. Deadlines are sequential: daily landings
+# by 9am, ELT layers by 10am, leaving time for the pipeline to run.
+# `lower_bound_delta` is how far before the deadline a materialization
+# counts as "fresh" (24h = anywhere in the prior day is fine).
+_FRESHNESS_LANDING = FreshnessPolicy.cron(
+    deadline_cron="0 9 * * *", lower_bound_delta=timedelta(hours=24)
+)
+_FRESHNESS_ELT = FreshnessPolicy.cron(
+    deadline_cron="0 10 * * *", lower_bound_delta=timedelta(hours=24)
+)
+
+
 class EltDbtTranslator(DagsterDbtTranslator):
     """Prefix asset keys with their dbt layer folder, assign sensible
-    group names to seeds + sources, and attach AutomationCondition.eager()
-    to every partitioned model except the sensor-gated tagged ones.
+    group names to seeds + sources, attach AutomationCondition.eager()
+    to every partitioned model except the sensor-gated tagged ones,
+    and attach a per-layer FreshnessPolicy to every partitioned model.
     """
 
     def get_asset_key(self, dbt_resource_props) -> AssetKey:
@@ -114,6 +129,28 @@ class EltDbtTranslator(DagsterDbtTranslator):
         if "latest_available" in tags:
             return None
         return AutomationCondition.eager()
+
+    def get_freshness_policy(self, dbt_resource_props):
+        """Attach a per-layer FreshnessPolicy.
+
+        FreshnessPolicy is pure metadata on the asset — it is NOT an
+        AssetChecksDefinition, so it does NOT inject a check step into
+        any materialization job. Dagster's automation sensor evaluates
+        it out-of-band and surfaces PASS / WARN / FAIL on the asset's
+        Checks tab.
+
+        Seeds: no freshness (they don't change on a schedule).
+        Landing dbt models: 9am deadline.
+        Staging / mart / reporting: 10am deadline.
+        """
+        if dbt_resource_props.get("resource_type") == "seed":
+            return None
+        layer = _layer_from_path(dbt_resource_props.get("original_file_path", ""))
+        if layer == "landing":
+            return _FRESHNESS_LANDING
+        if layer in ("staging", "mart", "reporting"):
+            return _FRESHNESS_ELT
+        return None
 
 
 translator = EltDbtTranslator(

@@ -28,6 +28,7 @@ from dagster_dbt import (
 
 from ml_pipelines.constants import (
     DUCKDB_WRITER_TAGS,
+    FRESHNESS_ML_DAILY,
     TRANSIENT_LOCK_RETRY_POLICY,
 )
 from ml_pipelines.partitions import daily_partitions
@@ -67,6 +68,12 @@ class MlDbtTranslator(DagsterDbtTranslator):
         if dbt_resource_props.get("resource_type") == "source":
             return "sources"
         return super().get_group_name(dbt_resource_props)
+
+    def get_freshness_policy(self, dbt_resource_props):
+        """Daily freshness on the ml_features dbt models."""
+        if dbt_resource_props.get("resource_type") == "seed":
+            return None
+        return FRESHNESS_ML_DAILY
 
 
 translator = MlDbtTranslator(

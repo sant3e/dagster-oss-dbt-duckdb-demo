@@ -1,6 +1,8 @@
 """Static names and paths referenced across elt_pipelines."""
 
-from dagster import Backoff, Jitter, RetryPolicy
+from datetime import timedelta
+
+from dagster import Backoff, FreshnessPolicy, Jitter, RetryPolicy
 
 # Tag key used for DuckDB-writer concurrency serialization (see dagster.yaml).
 DUCKDB_WRITER_CONCURRENCY_KEY = "duckdb_writer"
@@ -38,3 +40,16 @@ FILENAME_PREFIXES_DAILY = {
 FILENAME_PREFIXES_MONTHLY = {
     "prd_info": "prd_info_",
 }
+
+# Freshness policies attached to the Dagster-owned landing assets.
+# Pure metadata — evaluated out-of-band by Dagster's automation sensor;
+# does NOT inject a check step into materialization runs.
+FRESHNESS_LANDING_DAILY = FreshnessPolicy.cron(
+    deadline_cron="0 9 * * *", lower_bound_delta=timedelta(hours=24)
+)
+FRESHNESS_LANDING_MONTHLY = FreshnessPolicy.cron(
+    deadline_cron="0 9 2 * *",
+    # Must be <= the smallest interval between cron ticks. The smallest
+    # month is February (28 days), so cap lower_bound_delta there.
+    lower_bound_delta=timedelta(days=28),
+)

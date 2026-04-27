@@ -9,6 +9,7 @@ from elt_pipelines.assets._landing_shared import land_daily_csv
 from elt_pipelines.constants import (
     DUCKDB_WRITER_TAGS,
     FILENAME_PREFIXES_DAILY,
+    FRESHNESS_LANDING_DAILY,
     GROUP_LANDING,
     TRANSIENT_LOCK_RETRY_POLICY,
 )
@@ -27,6 +28,7 @@ from elt_pipelines.partitions import daily_partitions
     compute_kind="duckdb",
     op_tags=DUCKDB_WRITER_TAGS,
     retry_policy=TRANSIENT_LOCK_RETRY_POLICY,
+    freshness_policy=FRESHNESS_LANDING_DAILY,
 )
 def raw_loc_a101(context: AssetExecutionContext, duckdb: DuckDBResource) -> None:
     landing_dir = os.environ.get("DATA_LANDING_DIR", "/data/landing")

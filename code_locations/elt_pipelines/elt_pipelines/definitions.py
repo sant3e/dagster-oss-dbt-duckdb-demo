@@ -13,7 +13,6 @@ from elt_pipelines.assets import (
     landing_products,
     landing_sales,
 )
-from elt_pipelines.freshness_checks import all_freshness_checks, freshness_checks_sensor
 from elt_pipelines.jobs import all_jobs
 from elt_pipelines.resources import build_resources
 from elt_pipelines.sensors import cross_partition_sensor, landing_file_sensor
@@ -27,12 +26,10 @@ defs = Definitions(
         dbt_assets_module.elt_dbt_assets,
         dbt_assets_module.elt_dbt_seed_assets,
     ],
-    asset_checks=all_freshness_checks,
     jobs=all_jobs,
     sensors=[
         landing_file_sensor,
         cross_partition_sensor,
-        freshness_checks_sensor,
     ],
     resources=build_resources(),
 )

@@ -15,7 +15,11 @@ from dagster_duckdb import DuckDBResource
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 
-from ml_pipelines.constants import DUCKDB_WRITER_TAGS, TRANSIENT_LOCK_RETRY_POLICY
+from ml_pipelines.constants import (
+    DUCKDB_WRITER_TAGS,
+    FRESHNESS_ML_DAILY,
+    TRANSIENT_LOCK_RETRY_POLICY,
+)
 from ml_pipelines.partitions import daily_partitions
 
 _SEGMENT_LABELS = {
@@ -40,6 +44,7 @@ _SEGMENT_LABELS = {
     partitions_def=daily_partitions,
     op_tags=DUCKDB_WRITER_TAGS,
     retry_policy=TRANSIENT_LOCK_RETRY_POLICY,
+    freshness_policy=FRESHNESS_ML_DAILY,
 )
 def customer_segments(context: AssetExecutionContext, duckdb: DuckDBResource) -> None:
     partition_key = context.partition_key  # "YYYY-MM-DD"
