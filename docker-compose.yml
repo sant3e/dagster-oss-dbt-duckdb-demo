@@ -74,7 +74,7 @@ services:
       [ -d dbt_packages/dbt_utils ] || dbt deps --profiles-dir /opt/dbt_project &&
       dbt parse --profiles-dir /opt/dbt_project --target-path /tmp/dbt_target &&
       cd /opt/code_location &&
-      exec dagster api grpc -h 0.0.0.0 -p 4000 -m elt_pipelines.definitions
+      exec dagster code-server start -h 0.0.0.0 -p 4000 -m elt_pipelines.definitions
       "
     networks:
       - dagster_net
@@ -116,7 +116,7 @@ services:
       [ -d dbt_packages/dbt_utils ] || (echo 'Timed out waiting for dbt_packages; running dbt deps here' && dbt deps --profiles-dir /opt/dbt_project) &&
       dbt parse --profiles-dir /opt/dbt_project --target-path /tmp/dbt_target &&
       cd /opt/code_location &&
-      exec dagster api grpc -h 0.0.0.0 -p 4000 -m ml_pipelines.definitions
+      exec dagster code-server start -h 0.0.0.0 -p 4000 -m ml_pipelines.definitions
       "
     networks:
       - dagster_net
