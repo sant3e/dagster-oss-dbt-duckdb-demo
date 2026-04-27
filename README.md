@@ -139,7 +139,7 @@ The ML side doesn't auto-fire just because ELT finished. `customer_rfm` is owned
 
 **Path A — sensor-driven (shows the cross-location sensor feature):**
 
-1. Turn on **`customer_rfm_updated_sensor`** in the `ml_pipelines` code location (Automation → Sensors).
+1. Turn on **`ml_features_updated_sensor`** in the `ml_pipelines` code location (Automation → Sensors).
 2. Go to **Assets → `ml_features/customer_rfm` → Materialize**. This runs the dbt model.
 3. Within 30 s the sensor notices the materialization and automatically fires **`ml_training_job`**, which produces `ml_features.customer_segments` (KMeans) and `ml_features.churn_predictions` (LogReg + serialized joblib model at `/warehouse/artifacts/churn_model.joblib`).
 
@@ -228,7 +228,7 @@ LIMIT 15;
 | **Cross-partition sensor (imperative)** | `daily_monthly_bridge_sensor` — bridges daily downstreams to their monthly upstream. |
 | **Auto-materialize (declarative)** | `AutomationCondition.eager()` on mart models — `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py`. |
 | **Manual dbt-seed job** | `dbt_seed_job` in Jobs. |
-| **Cross-location asset sensor** | `customer_rfm_updated_sensor` (ml_pipelines) — listens to a materialization produced by the ml dbt layer whose upstreams are in elt_pipelines. |
+| **Cross-location asset sensor** | `ml_features_updated_sensor` (ml_pipelines) — listens to a materialization produced by the ml dbt layer whose upstreams are in elt_pipelines. |
 | **ML fan-out** | `customer_segments` (KMeans) + `churn_predictions` (LogisticRegression) both consume `customer_rfm`. |
 
 ---
@@ -241,11 +241,11 @@ The project intentionally demos **both** approaches to trigger downstream work, 
 |---|---|---|
 | staging → mart (elt) | `AutomationCondition.eager()` on mart dbt models | Declarative, built into the dbt translator. The default choice when you just want "refresh when upstreams change." |
 | (daily landing + monthly landing) → ELT job | `daily_monthly_bridge_sensor` (imperative sensor) | Needed for cadence-bridging — `AutomationCondition` can't express "wait for one partition of the daily asset AND the corresponding month of the monthly asset." |
-| elt reporting → ml training (cross-code-location) | `customer_rfm_updated_sensor` (imperative sensor) | Showcases **cross-code-location event triggers** — one location's sensor reacting to another's materializations. |
+| elt reporting → ml training (cross-code-location) | `ml_features_updated_sensor` (imperative sensor) | Showcases **cross-code-location event triggers** — one location's sensor reacting to another's materializations. |
 
 ### "Wouldn't AutomationCondition alone do it?"
 
-Yes, mostly. In modern Dagster (1.12+) `AutomationCondition.eager()` stitches across code locations and **would** auto-fire the ML assets whenever their upstreams in `elt_pipelines` update. We deliberately did **not** put it on the ML assets — the sensor is there to demonstrate the sensor pattern. If you prefer a pure-declarative setup, you can delete `customer_rfm_updated_sensor` and add `AutomationCondition.eager()` to `customer_rfm`, `customer_segments`, and `churn_predictions` instead. Both approaches are valid.
+Yes, mostly. In modern Dagster (1.12+) `AutomationCondition.eager()` stitches across code locations and **would** auto-fire the ML assets whenever their upstreams in `elt_pipelines` update. We deliberately did **not** put it on the ML assets — the sensor is there to demonstrate the sensor pattern. If you prefer a pure-declarative setup, you can delete `ml_features_updated_sensor` and add `AutomationCondition.eager()` to `customer_rfm`, `customer_segments`, and `churn_predictions` instead. Both approaches are valid.
 
 ### Rules of thumb
 
