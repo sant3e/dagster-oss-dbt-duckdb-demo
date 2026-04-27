@@ -47,6 +47,14 @@ open http://localhost:3000
 
 Confirm on the **Deployment** tab that both `elt_pipelines` and `ml_pipelines` are green.
 
+> **Before you delete the folder or move on**, bring the stack down first:
+>
+> ```bash
+> make down           # or: docker compose down
+> ```
+>
+> Docker tracks the containers independently of the source tree, so a bare `rm -rf` on the folder leaves them running (and port 3000 occupied). If you want to reclaim disk too, remove the images with `docker rmi dagster_oss_template/dagster:latest dagster_oss_template/elt_pipelines:latest dagster_oss_template/ml_pipelines:latest` or run `docker system prune`.
+
 ---
 
 ## Running the demo
