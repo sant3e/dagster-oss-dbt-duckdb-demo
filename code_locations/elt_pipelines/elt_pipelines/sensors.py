@@ -415,13 +415,116 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
     latest_available_assets = find_assets_with_tag(manifest, "latest_available")
     latest_available_source_assets = find_assets_with_tag(manifest, "latest_available_source")
 
-    if not latest_available_assets and not latest_available_source_assets:
+    # For Pass 0 we also need the set of seed-derived staging models —
+    # partitioned dbt models whose ONLY deps are seeds (or other ancestors
+    # that resolve to unpartitioned). These can't be driven by AC because
+    # their upstream has no time-partition for `any_deps_updated` to fire
+    # on. We detect them structurally rather than via tag — a model whose
+    # direct deps are all seeds (in manifest['nodes']) is eligible.
+    seed_derived_assets: List[dict] = []
+    for node_id, node in manifest.get("nodes", {}).items():
+        if node.get("resource_type") != "model":
+            continue
+        if "latest_available" in node.get("tags", []):
+            continue
+        if "latest_available_source" in node.get("tags", []):
+            continue
+        dep_ids = node.get("depends_on", {}).get("nodes", [])
+        if not dep_ids:
+            continue
+        # All deps must be seeds (resource_type='seed') to qualify.
+        all_seeds = True
+        for dep_id in dep_ids:
+            dep_node = manifest.get("nodes", {}).get(dep_id)
+            if dep_node is None or dep_node.get("resource_type") != "seed":
+                all_seeds = False
+                break
+        if all_seeds:
+            seed_derived_assets.append({
+                "node_id": node_id,
+                "name": node.get("name"),
+                "tags": node.get("tags", []),
+                "depends_on": dep_ids,
+            })
+
+    if (
+        not latest_available_assets
+        and not latest_available_source_assets
+        and not seed_derived_assets
+    ):
         return SensorResult(
             skip_reason=SkipReason(
-                "No dbt models tagged `latest_available` or `latest_available_source`."
+                "No dbt models tagged `latest_available` / `latest_available_source`, "
+                "and no seed-derived partitioned models to drive."
             ),
             cursor=_build_new_cursor({}, prev_cursor),
         )
+
+    # ---- Pass 0: seed-derived daily-partitioned staging models ----
+    # stg_erp_CUST_AZ12, stg_erp_PX_CAT_G1V2 — partitioned daily but their
+    # only upstream is an unpartitioned seed. AC can't drive them because
+    # `any_deps_updated()` never fires (the seed materialized before the
+    # sensor's cursor). We fire them for every daily partition where at
+    # least one "sibling" daily raw/* Python asset has materialized, and
+    # this model hasn't. This keeps them in lockstep with the daily data
+    # without any partition-grid fan-out.
+    #
+    # The sibling set = the daily Python landing assets owned by the ELT
+    # layer. Hardcoded here because they're defined in Python (not dbt)
+    # so they don't appear in the manifest's dep graph for the seed-only
+    # staging models.
+    _SIBLING_DAILY_RAW_KEYS = [
+        AssetKey(["raw", "raw_cust_info"]),
+        AssetKey(["raw", "raw_sales_details"]),
+        AssetKey(["raw", "raw_loc_a101"]),
+    ]
+    if seed_derived_assets:
+        sibling_partitions: set = set()
+        for sib_key in _SIBLING_DAILY_RAW_KEYS:
+            try:
+                sibling_partitions |= set(
+                    context.instance.get_materialized_partitions(sib_key) or []
+                )
+            except Exception:
+                pass
+        # Rate-limit to the most recent EXPANSION_PARTITION_LIMIT days.
+        sibling_daily_parts = get_latest_partitions_only(
+            sorted(sibling_partitions), limit=EXPANSION_PARTITION_LIMIT
+        )
+        context.log.info(
+            f"Pass-0 sibling daily partitions: {sibling_daily_parts}"
+        )
+
+        for asset_info in seed_derived_assets:
+            asset_name = asset_info["name"]
+            node_id = asset_info["node_id"]
+            asset_key = _asset_key_from_dbt_node(manifest, node_id)
+            try:
+                already_materialized = set(
+                    context.instance.get_materialized_partitions(asset_key) or []
+                )
+            except Exception:
+                already_materialized = set()
+
+            for partition in sibling_daily_parts:
+                if partition in already_materialized:
+                    continue
+                if _was_recently_triggered(prev_cursor, asset_name, partition):
+                    continue
+                run_requests.append(
+                    RunRequest(
+                        run_key=f"cxp-seed-{asset_name}-{partition}",
+                        asset_selection=[asset_key],
+                        partition_key=partition,
+                        tags={
+                            "triggered_by": "cross_partition_sensor",
+                            "reason": "seed_derived_sibling_expansion",
+                            "expansion_mode": "seed_to_daily",
+                            "seed_derived_asset": asset_name,
+                        },
+                    )
+                )
+                cursor_triggered.setdefault(asset_name, []).append(partition)
 
     # ---- Pass 1: latest_available_source assets ----
     # These are the slow-cadence staging models whose upstream is a monthly
@@ -455,8 +558,18 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
             source_partitions.extend(dep_parts)
 
         # The source partitions for a monthly source are month-start dates
-        # like "2026-04-01". We expand that to daily keys "2026-04-01" ..
-        # yesterday (UTC) because the STG is daily-partitioned.
+        # like "2026-04-01". In this demo we fire the stg EXACTLY on those
+        # month-start dates — that's the one day where all daily siblings
+        # (raw_cust_info etc.) also have data that can pair with the
+        # monthly product snapshot inside dim_products_history.
+        #
+        # Rationale: the point of `latest_available_source` is not "project
+        # this month's data onto every day of the month." It's "this staging
+        # model's row-set only changes when the monthly source updates." So
+        # fire it once per monthly source partition — on the monthly date
+        # itself. Downstream marts that need a daily grid (like
+        # dim_products_history) are separately driven in Pass 2 via
+        # latest-available-on-or-before on the exact_match deps.
         source_partitions = sorted(set(source_partitions))
         if not source_partitions:
             context.log.info(
@@ -464,13 +577,14 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
             )
             continue
 
-        base_range = generate_expansion_date_range(source_partitions)
+        # Fire one stg partition per monthly source partition, most-recent
+        # first, rate-limited to EXPANSION_PARTITION_LIMIT entries.
         target_limited = get_latest_partitions_only(
-            base_range, limit=EXPANSION_PARTITION_LIMIT
+            source_partitions, limit=EXPANSION_PARTITION_LIMIT
         )
         context.log.info(
             f"Pass-1 source {asset_name}: upstream partitions {source_partitions}, "
-            f"expansion range {len(target_limited)} days"
+            f"firing {len(target_limited)} stg partitions (one per monthly source partition)"
         )
 
         asset_key = _asset_key_from_dbt_node(manifest, node_id)
