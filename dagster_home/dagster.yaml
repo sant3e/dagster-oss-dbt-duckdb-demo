@@ -1,8 +1,26 @@
 # SQLite storage is the default when the storage blocks are omitted —
 # files land under $DAGSTER_HOME. That's what we want for a local demo.
 
-# Serialize DuckDB writers: only one run with the `duckdb_writer` tag
-# can execute at a time. All writing assets/jobs set this tag.
+# Run coordination.
+#
+# `max_concurrent_runs: 4` is the instance-wide cap — at most 4 runs may
+# execute at the same time, regardless of tags.
+#
+# `tag_concurrency_limits` adds a finer constraint on top: any run whose
+# tags include `dagster/concurrency_key=duckdb_writer` is counted against
+# a separate slot pool of size 1. In this project EVERY writing job and
+# asset is tagged `duckdb_writer` (see DUCKDB_WRITER_TAGS in
+# elt_pipelines/constants.py), so in practice runs execute serially.
+#
+# Why: DuckDB is a single-writer database — only one OS process may hold
+# the file's write lock at a time. A concurrent writer would see
+# `database is locked` errors. This limit makes that impossible.
+#
+# When porting to a multi-writer warehouse (Snowflake, BigQuery,
+# Postgres, etc.), remove the `tag_concurrency_limits` block entirely
+# (or raise the `limit`). At that point `max_concurrent_runs` takes
+# over and you'll get true parallelism — 4 concurrent runs by default,
+# bump it to whatever your warehouse + webserver can comfortably handle.
 run_coordinator:
   module: dagster.core.run_coordinator
   class: QueuedRunCoordinator
