@@ -107,28 +107,29 @@ class EltDbtTranslator(DagsterDbtTranslator):
         return super().get_group_name(dbt_resource_props)
 
     def get_automation_condition(self, dbt_resource_props):
-        """AutomationCondition.eager() for every partitioned non-seed model
+        """AutomationCondition for every partitioned non-seed model
         EXCEPT those tagged `latest_available` — those are fired by the
-        cross_partition_sensor in expansion mode, so they can materialize
-        daily even when their slow-cadence upstream hasn't updated.
+        cross_partition_sensor in expansion mode.
 
-        Models tagged `latest_available_source` keep AC.eager() — the tag
-        just signals to the sensor "this asset is the dbt-side handle on
-        slow-cadence data." It should still fire normally via AC when its
-        OWN upstream updates (once a month for the monthly product data).
+        The `eager().without(in_latest_time_window())` pattern: `eager()`
+        by default only fires assets within the "latest time window"
+        (today's partition for daily), which means older partitions
+        never cascade automatically. We strip that restriction so any
+        materialized upstream partition can cascade — important for
+        the demo, where day-1 is 2026-04-01 while today is 2026-04-27.
+        Same workaround used by imp_finance_mart
+        (bhi_imp/assets/dbt_imp_mart/utilities.py:102).
 
-        Seeds themselves return None — they're not partitioned and
-        don't participate in the daily cascade. Materialize them via
-        `dbt_seed_job` (Step 1 of the demo); their downstream
-        `raw_erp_*` landing wrappers carry AC.eager() like every other
-        partitioned asset.
+        Seeds and `latest_available` assets return None.
         """
         tags = dbt_resource_props.get("tags", []) or []
         if dbt_resource_props.get("resource_type") == "seed":
             return None
         if "latest_available" in tags:
             return None
-        return AutomationCondition.eager()
+        return AutomationCondition.eager().without(
+            AutomationCondition.in_latest_time_window()
+        )
 
     def get_freshness_policy(self, dbt_resource_props):
         """Attach a per-layer FreshnessPolicy.
