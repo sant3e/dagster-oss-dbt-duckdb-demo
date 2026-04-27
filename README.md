@@ -72,7 +72,19 @@ dagster job execute -m elt_pipelines.definitions -j dbt_seed_job
 
 This populates `seeds.CUST_AZ12` (18,484 rows) and `seeds.PX_CAT_G1V2` (37 rows) in DuckDB.
 
-### Step 2 — Materialize day-1 landing (already shipped as CSVs in `data/landing/`)
+### Step 2 — Turn on the AutomationCondition + cross-partition sensors FIRST
+
+**Order matters.** Turn these on BEFORE the `landing_file_sensor` (Step 3):
+
+- **`elt_automation_condition_sensor`** (in `elt_pipelines`) — custom `AutomationConditionSensorDefinition` that replaces Dagster's built-in `default_automation_condition_sensor`. Adds `run_tags={"dagster/concurrency_key": "duckdb_writer"}` on every run so the implicit `__ASSET_JOB` runs inherit the DuckDB writer limit and don't race on the file lock.
+- **`ml_automation_condition_sensor`** (in `ml_pipelines`) — same pattern for the ml chain.
+- **`cross_partition_sensor`** (in `elt_pipelines`) — tag-driven, ported from `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. Reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source`) and fires one RunRequest per day in expansion mode — so `dim_products_history` keeps materializing daily even while its monthly source hasn't updated.
+
+**Why enable these first?** Dagster's `AutomationCondition.eager()` wraps its trigger clause in `.since_last_handled()`, which on the sensor's very first tick (its "initial evaluation") will NOT fire for partitions that were missing before the sensor existed. Both reference projects (`imp_v2-dagster-etl` and `fpa-finance_mart_w_data_vault`) have the same safeguard; they get away with it because in production their sensors are always-on (`default_status=RUNNING`) — upstream materializations always land AFTER the sensor is already ticking, so the cascade fires naturally via `any_deps_updated`.
+
+Here we reproduce that invariant by enabling the AC sensors before any raw data lands. The first tick sees no work (everything is missing, nothing has "newly updated" yet) — that's fine. When Step 3's `landing_file_sensor` materializes `raw/*` a moment later, the NEXT AC tick sees those materializations as newly-updated deps and cascades downstream normally.
+
+### Step 3 — Materialize day-1 landing (already shipped as CSVs in `data/landing/`)
 
 Turn on **`landing_file_sensor`** in the UI (Automation → Sensors → toggle on). Within 30 seconds it detects the four CSVs already sitting in `data/landing/` and launches:
 
@@ -83,19 +95,12 @@ Turn on **`landing_file_sensor`** in the UI (Automation → Sensors → toggle o
 
 These populate `raw.sales_details`, `raw.cust_info`, `raw.loc_a101`, `raw.prd_info` in DuckDB (all with a `snapshot_date` / `snapshot_month` column carrying the partition key).
 
-### Step 3 — Watch the cascade self-propagate via AutomationCondition + the cross-partition sensor
+With the Step-2 sensors already running, partition `2026-04-01` cascades automatically within ~90 seconds:
 
-Turn on **`elt_automation_condition_sensor`** (in the `elt_pipelines` code location) and **`ml_automation_condition_sensor`** (in `ml_pipelines`). These are custom `AutomationConditionSensorDefinition`s that replace Dagster's built-in `default_automation_condition_sensor`. The critical thing they add is `run_tags={"dagster/concurrency_key": "duckdb_writer"}` on every run they emit — without that, the implicit `__ASSET_JOB` runs fire in parallel and race on the DuckDB file lock.
-
-Turn on **`cross_partition_sensor`** too. Tag-driven sensor ported from `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. It reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source`) and fires one RunRequest per day in expansion mode — so the mart keeps materializing daily even while the underlying monthly source hasn't updated, reusing the latest monthly snapshot until a newer one arrives.
-
-With those three sensors on (plus `landing_file_sensor` from Step 2), partition `2026-04-01` should cascade end-to-end within ~90 seconds: `raw/*` (Python landing) → staging → mart → reporting via AC, plus `dim_products_history` via the cross-partition sensor.
-
-With both sensors on, partition `2026-04-01` cascades automatically end-to-end:
-- `raw/*` landings already materialized (Step 2).
-- `AutomationCondition.eager()` on `staging/stg_*` (the ones fed by daily sources: `stg_crm_cust_info`, `stg_crm_sales_details`, `stg_erp_LOC_A101`) fires those for 2026-04-01 directly from their upstream `raw/*` Python assets.
-- `cross_partition_sensor` fires `mart/dim_products_history` (tagged `latest_available`) for 2026-04-01, joining the April monthly snapshot from `stg_crm_prd_info` (tagged `latest_available_source` — the dbt-side handle on the monthly source) with the daily seed-derived `stg_erp_PX_CAT_G1V2`.
-- `AutomationCondition.eager()` on the rest of staging (seed-based `stg_erp_CUST_AZ12` / `stg_erp_PX_CAT_G1V2`), all of mart, all of reporting cascades down per-partition.
+- **`raw/*` landings** materialized by `landing_file_sensor`.
+- **`AutomationCondition.eager()` on `staging/stg_*`** (fed by daily sources: `stg_crm_cust_info`, `stg_crm_sales_details`, `stg_erp_LOC_A101`) fires for 2026-04-01 on the next AC tick — the raw/* materializations are "newly updated" from the AC sensor's cursor perspective.
+- **`cross_partition_sensor` fires `mart/dim_products_history`** (tagged `latest_available`) for 2026-04-01, joining the April monthly snapshot from `stg_crm_prd_info` (tagged `latest_available_source`) with the daily seed-derived `stg_erp_PX_CAT_G1V2`.
+- **The rest of staging, all of mart, all of reporting cascades down per-partition** via `AutomationCondition.eager()`.
 - Every dbt model lands with `snapshot_date = 2026-04-01` and 60,398 / 18,484 / 397 rows in the respective tables.
 
 ### Step 4 — Drop event-day files to see the daily cadence in action
