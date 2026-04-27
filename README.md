@@ -88,8 +88,24 @@ Turn on **`daily_monthly_bridge_sensor`**. It notices that all three daily upstr
 
 ### Step 4 — Drop event-day files to see the daily cadence in action
 
-The `future_landing_data/` folder contains **event-style** CSVs (only the rows that represent events that happened on that specific day): new orders, new customers, marital-status flips, country moves, and — in the monthly file — new products and cost revisions. Copy them in:
+The `future_landing_data/` folder is **empty by default** (it only ships with a README). You generate the event-style CSVs yourself using the Faker-based generator — this keeps the repo lean and lets you pick whatever dates you want for the demo.
 
+First-time prereq (one-off):
+```bash
+pip install faker
+# on macOS with PEP-668 protections:
+pip install --break-system-packages faker
+```
+
+Generate a few days of event snapshots:
+```bash
+# From the project root — covers April 2–5:
+python3 scripts/generate_future_landing_data.py --start 2026-04-02 --days 4
+```
+
+That produces 12 files in `future_landing_data/` — 4 daily customer snapshots, 4 daily location snapshots, 4 daily sales snapshots (realistic Faker names, positive sales values, monotonic IDs).
+
+Then copy them into `data/landing/` so the sensor picks them up:
 ```bash
 cp future_landing_data/*.csv data/landing/
 ```
@@ -99,16 +115,9 @@ You'll see (within 30 s):
 1. `landing_file_sensor` fires new landing runs: one daily run per `YYYY_MM_DD` triple of files found, one monthly run per `YYYY_MM` file found.
 2. `daily_monthly_bridge_sensor` fires `dbt_elt_job` for every day whose month has a materialized monthly partition. If you only drop daily files for May but no May monthly file, the bridge sensor **waits** — exactly the cadence-mismatch pattern it exists to demonstrate.
 
-#### Generating more days on demand
-
-The `future_landing_data/` files are produced by a Faker-powered generator. To make additional days:
+#### Other generator invocations
 
 ```bash
-# Prereq (one-time):
-pip install faker
-# (on macOS with PEP-668 protections:)
-pip install --break-system-packages faker
-
 # Single day:
 python3 scripts/generate_future_landing_data.py --start 2026-04-06
 
