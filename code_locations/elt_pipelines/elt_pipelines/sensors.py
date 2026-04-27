@@ -28,12 +28,10 @@ from pathlib import Path
 
 from dagster import (
     AssetKey,
-    MultiAssetSensorEvaluationContext,
     RunRequest,
     SensorEvaluationContext,
     SensorResult,
     SkipReason,
-    multi_asset_sensor,
     sensor,
 )
 
@@ -53,11 +51,11 @@ _MONTHLY_FILENAME_TO_ASSET_KEY = {
 }
 
 _DAILY_FILENAME_RE = re.compile(
-    r"^(?P<prefix>[a-z_]+_)(?P<date>\d{4}_\d{2}_\d{2})\.csv$",
+    r"^(?P<prefix>[a-z0-9_]+?_)(?P<date>\d{4}_\d{2}_\d{2})\.csv$",
     re.IGNORECASE,
 )
 _MONTHLY_FILENAME_RE = re.compile(
-    r"^(?P<prefix>[a-z_]+_)(?P<month>\d{4}_\d{2})\.csv$",
+    r"^(?P<prefix>[a-z0-9_]+?_)(?P<month>\d{4}_\d{2})\.csv$",
     re.IGNORECASE,
 )
 
@@ -153,9 +151,8 @@ def _month_partition_for_day(day_key: str) -> str:
     return d.replace(day=1).isoformat()
 
 
-@multi_asset_sensor(
+@sensor(
     name="daily_monthly_bridge_sensor",
-    monitored_assets=[*_DAILY_UPSTREAMS, _MONTHLY_UPSTREAM],
     job=dbt_elt_job,
     minimum_interval_seconds=30,
     description=(
@@ -165,66 +162,78 @@ def _month_partition_for_day(day_key: str) -> str:
         "materialization for month-of(D). This is the pattern that makes "
         "it possible to run a daily pipeline whose reference data lands "
         "once a month."
+        ""
+        "Implemented as a regular @sensor (not @multi_asset_sensor) because "
+        "the latter requires all monitored assets to share the same "
+        "partitions definition — which is exactly the constraint we need "
+        "to bridge."
     ),
 )
-def daily_monthly_bridge_sensor(context: MultiAssetSensorEvaluationContext):
-    # Pull the latest materialization record per partition for each monitored asset.
-    records = context.latest_materialization_records_by_partition_and_asset()
+def daily_monthly_bridge_sensor(context: SensorEvaluationContext):
+    instance = context.instance
 
-    # Build a quick lookup: has the monthly asset materialized for month M?
-    monthly_materialized_months: set[str] = set()
-    for partition_key, by_asset in records.items():
-        if _MONTHLY_UPSTREAM in by_asset:
-            monthly_materialized_months.add(partition_key)
+    # Cursor holds the JSON list of partition_keys we've already fired on,
+    # so we don't re-kick the ELT for the same day twice.
+    import json
+    already_fired: set[str] = set(json.loads(context.cursor)) if context.cursor else set()
+
+    # Which months does the monthly upstream already have materializations for?
+    monthly_done_months: set[str] = set()
+    for record in instance.fetch_materializations(
+        records_filter=_MONTHLY_UPSTREAM, limit=1000
+    ).records:
+        pk = record.partition_key
+        if pk:
+            monthly_done_months.add(pk)
+
+    # Find days where ALL THREE daily upstreams have a materialization.
+    # We scan each daily upstream's materializations and intersect the partition sets.
+    per_asset_partitions: list[set[str]] = []
+    for ak in _DAILY_UPSTREAMS:
+        partitions_for_this_asset: set[str] = set()
+        for record in instance.fetch_materializations(
+            records_filter=ak, limit=1000
+        ).records:
+            if record.partition_key:
+                partitions_for_this_asset.add(record.partition_key)
+        per_asset_partitions.append(partitions_for_this_asset)
+
+    if not per_asset_partitions:
+        return SensorResult(skip_reason=SkipReason("No daily materializations yet."))
+
+    days_ready_on_daily_side = set.intersection(*per_asset_partitions)
 
     run_requests: list[RunRequest] = []
-    advanced: dict[AssetKey, dict] = {}
-
-    for partition_key, by_asset in records.items():
-        # Skip the monthly partitions — we only kick runs off day-keyed partitions.
-        if _MONTHLY_UPSTREAM in by_asset and len(by_asset) == 1:
+    for day in sorted(days_ready_on_daily_side):
+        if day in already_fired:
             continue
-
-        # Require all three daily upstreams for this day.
-        daily_ready = all(k in by_asset for k in _DAILY_UPSTREAMS)
-        if not daily_ready:
-            continue
-
-        # Require the month-of(D) partition of the monthly upstream to exist.
-        month_needed = _month_partition_for_day(partition_key)
-        if month_needed not in monthly_materialized_months:
+        month_needed = _month_partition_for_day(day)
+        if month_needed not in monthly_done_months:
             context.log.info(
-                f"Day {partition_key} is ready on the daily side, but the monthly "
-                f"partition {month_needed} of raw_prd_info_monthly has not been "
-                f"materialized yet. Waiting."
+                f"Day {day} is ready on the daily side, but the monthly "
+                f"partition {month_needed} of raw_prd_info_monthly has not "
+                f"been materialized yet. Waiting."
             )
             continue
-
         run_requests.append(
             RunRequest(
-                run_key=f"elt-bridge-{partition_key}",
-                partition_key=partition_key,
+                run_key=f"elt-bridge-{day}",
                 tags={
                     "trigger/source": "daily_monthly_bridge_sensor",
-                    "partition": partition_key,
+                    "triggered_for_partition": day,
                     "monthly_bridge/month": month_needed,
                 },
             )
         )
-        # Advance the cursor past this day's daily materializations so we
-        # don't re-fire for the same day. We deliberately DO NOT advance
-        # the monthly cursor — the same monthly partition must stay
-        # available to validate subsequent days of the same month.
-        advanced[partition_key] = {
-            k: v for k, v in by_asset.items() if k in _DAILY_UPSTREAMS
-        }
+        already_fired.add(day)
 
-    for partition_key, per_asset in advanced.items():
-        context.advance_cursor(per_asset)
-
+    new_cursor = json.dumps(sorted(already_fired))
     if not run_requests:
-        return SkipReason(
-            "Waiting for all three daily upstreams AND the current month's "
-            "monthly upstream to be ready for the same day."
+        return SensorResult(
+            skip_reason=SkipReason(
+                "Waiting for all three daily upstreams AND the current "
+                "month's monthly upstream to be ready for the same day."
+            ),
+            cursor=new_cursor,
         )
-    return run_requests
+    return SensorResult(run_requests=run_requests, cursor=new_cursor)
