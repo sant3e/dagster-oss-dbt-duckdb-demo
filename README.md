@@ -276,6 +276,94 @@ This stops the stack, wipes the DuckDB warehouse + Dagster SQLite + dbt artifact
 
 ---
 
+## What this demo simulates (vs real-world)
+
+The Dagster patterns in this repo (code locations, partitioned assets, sensors, `@dbt_assets`, asset checks, AutomationCondition) are the **real thing** — they'd work unchanged in production. But the **data source and the landing layer are stand-ins** for real infrastructure. If you're using this demo to learn Dagster, it's worth being explicit about what's real and what's simulated.
+
+### Real-world flow
+
+In a production setup, daily snapshots come from an **actual ingestion pipeline** that lands rows into a **real warehouse** (Snowflake, BigQuery, etc.). Dagster watches the warehouse, not a filesystem folder.
+
+```
+[source system]
+     │ (extract via Airbyte / Fivetran / custom script)
+     ▼
+[landing area in a real warehouse — Snowflake/BigQuery/S3/GCS]
+  e.g. LANDING.RAW_SALES_DETAILS with a snapshot_date column,
+       appended daily by the ingestion pipeline
+     │
+     ▼
+[Dagster sensor monitoring the landing area]
+  - Snowflake partition sensor, GCS/S3 object sensor,
+    or custom table-growth sensor
+  - On detecting new data, fires downstream materialization
+     │
+     ▼
+[dbt models reading from LANDING via source()]
+     │
+     ▼
+[staging → mart → reporting]
+     │
+     ▼
+[AutomationCondition.eager() on marts drives refreshes
+ declaratively whenever staging updates]
+```
+
+Seeds, meanwhile, are genuinely static reference data — you drop a new CSV into `seeds/` and run `dbt seed` when the reference table needs refreshing. No sensor, no cadence.
+
+### How this demo implements it
+
+We replace three real components with cheaper stand-ins so the whole thing runs on your laptop:
+
+```
+[no source system — we fake it with a Faker-based generator]
+     │
+     ▼
+[./data/landing/ folder on the host, bind-mounted into containers]
+  = pretending to be the landing area
+     │
+     ▼
+[landing_file_sensor watches the folder via os.listdir()]
+  = pretending to be a warehouse partition sensor
+     │
+     ▼
+[Dagster landing assets read the CSVs and write to DuckDB raw.* tables]
+  = pretending to be the "ingestion finished, it's in LANDING now" state
+     │
+     ▼
+[dbt reads from raw.* via source('dagster_raw', ...)]
+     │
+     ▼
+[staging → mart → reporting]
+     │
+     ▼
+[AutomationCondition.eager() on marts — same as real world]
+```
+
+### What's simulated vs real
+
+| Real world | Demo stand-in |
+|---|---|
+| External source system | Faker-based generator (`scripts/generate_future_landing_data.py`) |
+| Ingestion pipeline (Airbyte / Fivetran / custom) | A plain `cp` command copying CSVs into `data/landing/` |
+| Landing warehouse table (Snowflake, BigQuery, …) | `./data/landing/*.csv` files on disk |
+| Sensor polling warehouse for new partitions | `landing_file_sensor` polling the folder |
+| Snowflake / BigQuery warehouse | Single DuckDB file at `./warehouse/oss_template.duckdb` |
+
+**What stays identical to production:**
+- Every Dagster pattern (code locations, partitioned assets, sensors, jobs, AutomationCondition, asset checks).
+- The dbt project structure and group-based access boundaries.
+- The cadence-bridging pattern (`daily_monthly_bridge_sensor`) — exactly how you'd coordinate daily downstreams against a monthly upstream in any real setup.
+
+**What you'd swap for production:**
+- Replace `landing_file_sensor` with whatever sensor suits your source (a Snowflake partition sensor, an S3 object sensor, etc.). Everything downstream of the sensor stays the same.
+- Replace DuckDB with your production warehouse. All dbt SQL would need minimal adjustment for vendor-specific functions (this project's SQL was ported FROM Snowflake TO DuckDB, so the reverse is small).
+- Replace the `cp` step with a real ingestion tool.
+
+The point: the Dagster and dbt pieces are production-shaped; only the infrastructure underneath them is local-first.
+
+---
+
 ## Things this template intentionally does NOT do
 
 - No authentication on the UI (don't expose port 3000 publicly).
