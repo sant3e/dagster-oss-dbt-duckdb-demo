@@ -13,6 +13,10 @@ passed. It contains the product-catalog changes during that month:
 
 Usage examples
 --------------
+# Dynamic: today - 2 and today - 1 (pairs with scripts/rebase_day1_csvs.sh
+# which sets day-1 = today - 3):
+python3 scripts/generate_future_landing_data.py --relative-to-today
+
 # A single day (just 2026-04-02):
 python3 scripts/generate_future_landing_data.py --start 2026-04-02
 
@@ -57,10 +61,28 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "data" / "landing"
 DST = ROOT / "future_landing_data"
 
-# Source files we read to stay consistent with the day-1 snapshot.
-DAY1_CUSTOMERS = SRC / "cust_info_2026_04_01.csv"
-DAY1_LOCATIONS = SRC / "loc_a101_2026_04_01.csv"
-MONTH1_PRODUCTS = SRC / "prd_info_2026_04.csv"
+
+def _find_template(prefix: str) -> Path:
+    """Find the single template CSV in data/landing/ matching ``<prefix>*.csv``.
+
+    The filename's date stamp is not fixed — ``scripts/rebase_day1_csvs.sh``
+    renames the git-tracked template files to ``<prefix>_<today-3>.csv``.
+    We resolve the template by prefix at call time so this generator works
+    regardless of what date the template currently carries.
+    """
+    matches = sorted(SRC.glob(f"{prefix}*.csv"))
+    if not matches:
+        raise FileNotFoundError(
+            f"No template file matching '{prefix}*.csv' in {SRC}. "
+            f"Run `make reset-demo` to restore the git-tracked templates, "
+            f"then `./scripts/rebase_day1_csvs.sh` to date-stamp them."
+        )
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Multiple files match '{prefix}*.csv' in {SRC}: {matches}. "
+            f"Run `make reset-demo` to clean up."
+        )
+    return matches[0]
 
 # Volume defaults (chatty mode).
 NEW_ORDERS_PER_DAY = (20, 40)            # min, max random.randint
@@ -118,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--start",
-        required=True,
+        required=False,
         type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),
         help="First day to generate (inclusive), format YYYY-MM-DD.",
     )
@@ -134,6 +156,15 @@ def parse_args() -> argparse.Namespace:
         help="Generate N consecutive days starting at --start.",
     )
     p.add_argument(
+        "--relative-to-today",
+        action="store_true",
+        help=(
+            "Dynamic mode: generate (today - 2) and (today - 1) — exactly "
+            "two consecutive days. Pairs with scripts/rebase_day1_csvs.sh "
+            "which anchors day-1 at (today - 3). Overrides --start/--end/--days."
+        ),
+    )
+    p.add_argument(
         "--monthly",
         action="store_true",
         help=(
@@ -143,7 +174,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument("--seed", type=int, default=42, help="Random seed (default 42).")
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.relative_to_today and args.start is None:
+        p.error("either --start or --relative-to-today is required")
+    return args
 
 
 # -------- data builders --------
@@ -325,7 +359,11 @@ def main() -> None:
     fake = Faker()
 
     start = args.start
-    if args.end:
+    if args.relative_to_today:
+        today = date.today()
+        start = today - timedelta(days=2)
+        end = today - timedelta(days=1)
+    elif args.end:
         end = args.end
     elif args.days:
         end = start + timedelta(days=args.days - 1)
@@ -337,9 +375,12 @@ def main() -> None:
         sys.exit(2)
 
     # Load day-1 baseline files (full snapshots) to seed our generators.
-    cust_header, cust_day1 = read_csv(DAY1_CUSTOMERS)
-    loc_header, loc_day1 = read_csv(DAY1_LOCATIONS)
-    prd_header, prd_day1 = read_csv(MONTH1_PRODUCTS)
+    # Templates are resolved by prefix, not a fixed filename, because
+    # scripts/rebase_day1_csvs.sh renames them to today-3 before this
+    # generator runs.
+    cust_header, cust_day1 = read_csv(_find_template("cust_info_"))
+    loc_header, loc_day1 = read_csv(_find_template("loc_a101_"))
+    prd_header, prd_day1 = read_csv(_find_template("prd_info_"))
 
     cust_idx = {c: cust_header.index(c) for c in cust_header}
     loc_idx = {c: loc_header.index(c) for c in loc_header}
@@ -433,7 +474,7 @@ def main() -> None:
             DST / f"loc_a101_{date_stamp}.csv",
             loc_header, new_loc_rows,
         )
-        sales_header, _ = read_csv(SRC / "sales_details_2026_04_01.csv")
+        sales_header, _ = read_csv(_find_template("sales_details_"))
         write_csv(
             DST / f"sales_details_{date_stamp}.csv",
             sales_header, new_sales_rows,
