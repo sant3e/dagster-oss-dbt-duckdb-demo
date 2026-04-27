@@ -204,7 +204,6 @@ def daily_monthly_bridge_sensor(context: SensorEvaluationContext):
     days_ready_on_daily_side = set.intersection(*per_asset_partitions)
 
     run_requests: list[RunRequest] = []
-    newly_ready_days: list[str] = []
     for day in sorted(days_ready_on_daily_side):
         if day in already_fired:
             continue
@@ -216,21 +215,17 @@ def daily_monthly_bridge_sensor(context: SensorEvaluationContext):
                 f"been materialized yet. Waiting."
             )
             continue
-        newly_ready_days.append(day)
         already_fired.add(day)
-
-    # Collapse N newly-ready days into ONE ELT run. dbt_elt_job is
-    # unpartitioned and rebuilds the whole pipeline from the current state
-    # of raw.* tables, so firing it once picks up all new days at once.
-    # Firing N times would just do the same work N times.
-    if newly_ready_days:
+        # Fire ONE partitioned run per ready day. Concurrency is serialized
+        # by the `duckdb_writer` tag, so dropping N days at once will still
+        # process them one at a time without DuckDB writer contention.
         run_requests.append(
             RunRequest(
-                run_key="elt-bridge-" + ",".join(newly_ready_days),
+                run_key=f"elt-{day}",
+                partition_key=day,
                 tags={
                     "trigger/source": "daily_monthly_bridge_sensor",
-                    "triggered_for_days": ",".join(newly_ready_days),
-                    "triggered_day_count": str(len(newly_ready_days)),
+                    "triggered_for_day": day,
                 },
             )
         )
