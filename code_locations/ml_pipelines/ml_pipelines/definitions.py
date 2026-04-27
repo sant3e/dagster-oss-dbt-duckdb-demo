@@ -5,7 +5,7 @@ from dagster import Definitions
 from ml_pipelines.assets import churn, dbt as dbt_assets_module, segmentation
 from ml_pipelines.jobs import all_jobs
 from ml_pipelines.resources import build_resources
-from ml_pipelines.sensors import customer_rfm_updated_sensor
+from ml_pipelines.sensors import ml_features_updated_sensor
 
 defs = Definitions(
     assets=[
@@ -14,6 +14,6 @@ defs = Definitions(
         churn.churn_predictions,
     ],
     jobs=all_jobs,
-    sensors=[customer_rfm_updated_sensor],
+    sensors=[ml_features_updated_sensor],
     resources=build_resources(),
 )
