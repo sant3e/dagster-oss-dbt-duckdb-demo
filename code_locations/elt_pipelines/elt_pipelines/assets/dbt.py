@@ -47,8 +47,9 @@ def _layer_from_path(original_file_path: str) -> str | None:
 
 
 class EltDbtTranslator(DagsterDbtTranslator):
-    """Prefix asset keys with their dbt layer folder and attach
-    AutomationCondition.eager() to mart-layer models.
+    """Prefix asset keys with their dbt layer folder, assign sensible
+    group names to seeds + sources, and attach AutomationCondition.eager()
+    to mart-layer models.
     """
 
     def get_asset_key(self, dbt_resource_props) -> AssetKey:
@@ -60,6 +61,19 @@ class EltDbtTranslator(DagsterDbtTranslator):
         if layer:
             return AssetKey([layer, name])
         return super().get_asset_key(dbt_resource_props)
+
+    def get_group_name(self, dbt_resource_props):
+        # dbt seeds — put them in a dedicated `seeds` group so they don't
+        # get lumped into the default bucket in the UI.
+        if dbt_resource_props.get("resource_type") == "seed":
+            return "seeds"
+        # dbt sources (the dagster_raw.* tables that Dagster landing assets
+        # populate) — give them a clear `sources` group too.
+        if dbt_resource_props.get("resource_type") == "source":
+            return "sources"
+        # Everything else: let the default translator pick up the group
+        # from the model's `+group:` config in dbt_project.yml.
+        return super().get_group_name(dbt_resource_props)
 
     def get_automation_condition(self, dbt_resource_props):
         if _layer_from_path(dbt_resource_props.get("original_file_path", "")) == "mart":

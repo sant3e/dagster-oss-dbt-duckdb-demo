@@ -50,6 +50,15 @@ class MlDbtTranslator(DagsterDbtTranslator):
             return AssetKey([layer, name])
         return super().get_asset_key(dbt_resource_props)
 
+    def get_group_name(self, dbt_resource_props):
+        # Same convention as elt_pipelines: seeds and sources get their
+        # own dedicated groups so they don't sit under `default` in the UI.
+        if dbt_resource_props.get("resource_type") == "seed":
+            return "seeds"
+        if dbt_resource_props.get("resource_type") == "source":
+            return "sources"
+        return super().get_group_name(dbt_resource_props)
+
 
 translator = MlDbtTranslator(
     settings=DagsterDbtTranslatorSettings(enable_asset_checks=True)
