@@ -62,118 +62,82 @@ Confirm on the **Deployment** tab that both `elt_pipelines` and `ml_pipelines` a
 
 ### Step 1 — Rebase the day-1 landing CSVs to today − 3
 
-Throughout this README, **day-1 / day-2 / day-3** refer to three consecutive demo partitions anchored at `today − 3` / `today − 2` / `today − 1`. Wherever you see "day-1", read: the partition key that Step 1 produces. Specific calendar dates appear only when the context requires them.
+Throughout this README, **day-1 / day-2 / day-3** refer to three consecutive demo partitions anchored at `today − 3` / `today − 2` / `today − 1`.
 
-The four CSVs shipped in `data/landing/` are a **template**. They carry whatever historical date the repo was last committed with — this date is only there so the files stay meaningful in git. Before the demo can run, we rename them and rewrite their `snapshot_date` / `snapshot_month` column so **day-1 of the demo is always 3 days before today**. This keeps every partition inside the **7-day eager-lookback window** configured in `elt_pipelines/assets/dbt.py`, regardless of when you run the demo.
-
-From the project root:
+The four CSVs shipped in `data/landing/` are a **template**. The `rebase_day1_csvs.sh` script renames them and rewrites their `snapshot_date` / `snapshot_month` column so day-1 always equals `today − 3` — keeping all demo partitions inside the 7-day eager-lookback window.
 
 ```bash
 ./scripts/rebase_day1_csvs.sh
 ```
 
-You'll see the 4 template files renamed (e.g. `cust_info_<old>.csv` → `cust_info_<today-3>.csv`) and their partition column rewritten to match. The monthly `prd_info_*.csv` is stamped with the **1st of today − 3's month**.
-
 ### Step 2 — Load static reference data
-`dbt seed` loads two reference tables that don't need daily or monthly snapshots (ERP customer birthdays + product category taxonomy).
 
-In the Dagster UI: **Jobs → `dbt_seed_job` → Materialize**. Or from the shell:
+In the Dagster UI: **Jobs → `dbt_seed_job` → Materialize**.
 
-```bash
-make shell-elt
-dagster job execute -m elt_pipelines.definitions -j dbt_seed_job
-```
+This loads `seeds.CUST_AZ12` (18,484 rows) and `seeds.PX_CAT_G1V2` (37 rows) — ERP customer birthdays and product category taxonomy. Neither changes day-to-day, so they're unpartitioned and loaded once.
 
-This populates `seeds.CUST_AZ12` (18,484 rows) and `seeds.PX_CAT_G1V2` (37 rows) in DuckDB.
+### Step 3 — Turn on the AutomationCondition + cross-partition sensors
 
-### Step 3 — Turn on the AutomationCondition + cross-partition sensors FIRST
+In the Dagster UI: **Automation → Sensors**, toggle on:
 
-**Order matters.** Turn these on BEFORE the `landing_file_sensor` (Step 4):
+- **`elt_automation_condition_sensor`** (in `elt_pipelines`)
+- **`ml_automation_condition_sensor`** (in `ml_pipelines`)
+- **`cross_partition_sensor`** (in `elt_pipelines`) — `cross_partition_sensor` fires `mart/dim_products_history` (tagged `latest_available`) for every new daily partition, joining the current-month monthly snapshot from `stg_crm_prd_info` (tagged `latest_available_source`) with the daily seed-derived `stg_erp_PX_CAT_G1V2`.
 
-- **`elt_automation_condition_sensor`** (in `elt_pipelines`) — custom `AutomationConditionSensorDefinition` that replaces Dagster's built-in `default_automation_condition_sensor`. Adds `run_tags={"dagster/concurrency_key": "duckdb_writer"}` on every run so the implicit `__ASSET_JOB` runs inherit the DuckDB writer limit and don't race on the file lock.
-- **`ml_automation_condition_sensor`** (in `ml_pipelines`) — same pattern for the ml chain.
-- **`cross_partition_sensor`** (in `elt_pipelines`) — tag-driven, ported from `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. Reads the dbt manifest for models tagged `latest_available` (marts that join a slow-cadence `latest_available_source`) and fires one RunRequest per day in expansion mode — so `dim_products_history` keeps materializing daily even while its monthly source hasn't updated.
+### Step 4 — Materialize day-1 landing
 
-**Why enable these first?** Dagster's `AutomationCondition.eager()` wraps its trigger clause in `.since_last_handled()`, which on the sensor's very first tick (its "initial evaluation") will NOT fire for partitions that were missing before the sensor existed. Both reference projects (`imp_v2-dagster-etl` and `fpa-finance_mart_w_data_vault`) have the same safeguard; they get away with it because in production their sensors are always-on (`default_status=RUNNING`) — upstream materializations always land AFTER the sensor is already ticking, so the cascade fires naturally via `any_deps_updated`.
-
-Here we reproduce that invariant by enabling the AC sensors before any raw data lands. The first tick sees no work (everything is missing, nothing has "newly updated" yet) — that's fine. When Step 4's `landing_file_sensor` materializes `raw/*` a moment later, the NEXT AC tick sees those materializations as newly-updated deps and cascades downstream normally.
-
-### Step 4 — Materialize day-1 landing (the CSVs you rebased in Step 1)
-
-Turn on **`landing_file_sensor`** in the UI (Automation → Sensors → toggle on). Within 30 seconds it detects the four CSVs sitting in `data/landing/` (stamped with the rebased date) and launches the **day-1** partition of the pipeline:
+In the UI, toggle on **`landing_file_sensor`**. Within 30 seconds it detects the four CSVs in `data/landing/` and launches the day-1 partition:
 
 - `raw_sales_details` (60,398 rows)
 - `raw_cust_info` (18,484 rows)
 - `raw_loc_a101` (18,484 rows)
 - `raw_prd_info_monthly` (397 rows)
 
-These populate `raw.sales_details`, `raw.cust_info`, `raw.loc_a101`, `raw.prd_info` in DuckDB (all with a `snapshot_date` / `snapshot_month` column carrying the partition key).
-
-With the Step-3 sensors already running, day-1 cascades automatically within ~90 seconds:
-
-- **`raw/*` landings** materialized by `landing_file_sensor`.
-- **`AutomationCondition.eager()` on `staging/stg_*`** (fed by daily sources: `stg_crm_cust_info`, `stg_crm_sales_details`, `stg_erp_LOC_A101`) fires for day-1 on the next AC tick — the raw/* materializations are "newly updated" from the AC sensor's cursor perspective.
-- **`cross_partition_sensor` fires `mart/dim_products_history`** (tagged `latest_available`) for day-1, joining the current-month monthly snapshot from `stg_crm_prd_info` (tagged `latest_available_source`) with the daily seed-derived `stg_erp_PX_CAT_G1V2`.
-- **The rest of staging, all of mart, all of reporting cascades down per-partition** via `AutomationCondition.eager()`.
-- Every dbt model lands with the day-1 partition key and 60,398 / 18,484 / 397 rows in the respective tables.
+Once `raw/*` lands, `AutomationCondition` cascades day-1 downstream through staging → mart → reporting within ~90 seconds.
 
 ### Step 5 — Drop event-day files to see the daily cadence in action
 
-The `future_landing_data/` folder is **empty by default** (it only ships with a README). You generate the event-style CSVs yourself using the Faker-based generator — this keeps the repo lean and lets you pick whatever dates you want for the demo.
+The `future_landing_data/` folder is **empty by default**. Generate day-2 and day-3 event CSVs:
 
 First-time prereq (one-off):
 ```bash
-# Recommended — works regardless of which pip your shell picks up:
 python3 -m pip install --break-system-packages faker
-
-# If that's rejected by PEP 668 without the flag, the --break-system-packages
-# is required on modern Homebrew/macOS Python installs.
-# If you use pyenv/conda/venv, drop the flag.
 ```
 
-Generate **day-2** and **day-3** (the two days that bring the pipeline up to yesterday):
+Generate:
 ```bash
-# Dynamic: today - 2 (= day-2) and today - 1 (= day-3).
-# Pairs with the Step 1 rebase which anchors day-1 at today - 3.
 python3 scripts/generate_future_landing_data.py --relative-to-today
 ```
 
-That produces 6 files in `future_landing_data/` — 2 daily customer snapshots, 2 daily location snapshots, 2 daily sales snapshots (realistic Faker names, positive sales values, monotonic IDs).
-
-Then copy them into `data/landing/` so the sensor picks them up:
+Copy the generated files into `data/landing/`:
 ```bash
 cp future_landing_data/*.csv data/landing/
 ```
 
-You'll see (within 30 s):
-
-1. `landing_file_sensor` fires new landing runs: one daily run per `YYYY_MM_DD` triple of files found, one monthly run per `YYYY_MM` file found.
-2. `AutomationCondition.eager()` on staging models fed by daily sources (`staging/stg_crm_cust_info`, `staging/stg_crm_sales_details`, `staging/stg_erp_LOC_A101`) auto-fires each daily partition (day-2, then day-3) as its upstream `raw/*` Python asset materializes.
-3. `cross_partition_sensor` ticks, sees the new daily dates, and fires `mart/dim_products_history` for day-2 and day-3, joining the current-month monthly snapshot (from `stg_crm_prd_info`) with that day's daily seed data. If day-2 or day-3 fall in a later month than day-1 and no monthly file exists for that later month, the sensor STILL fires those `dim_products_history` partitions — using the previous month's monthly snapshot. When a newer monthly file eventually lands, subsequent partitions switch to it automatically.
-4. The rest of staging, mart, and reporting cascade per-partition via `AutomationCondition.eager()`.
+`landing_file_sensor` picks them up within 30s and day-2 + day-3 cascade through staging → mart → reporting automatically.
 
 #### Other generator invocations
 
 ```bash
-# A single explicit day (replace with any date you want):
+# A single explicit day:
 python3 scripts/generate_future_landing_data.py --start YYYY-MM-DD
 
-# A date range (inclusive both ends):
+# A date range (inclusive):
 python3 scripts/generate_future_landing_data.py --start YYYY-MM-DD --end YYYY-MM-DD
 
-# N days from a start, plus a monthly file for each month touched:
+# N days plus a monthly file for each month touched:
 python3 scripts/generate_future_landing_data.py --start YYYY-MM-DD --days 7 --monthly
 ```
 
-Files land in `future_landing_data/`. The generator is idempotent across invocations — customer IDs, product IDs, and order numbers continue monotonically across runs, so you can generate multiple non-overlapping ranges without collisions. See `future_landing_data/README.md` for every option.
+The generator is idempotent across invocations — customer IDs, product IDs, and order numbers continue monotonically so non-overlapping ranges never collide.
 
-### Step 6 — Turn on the ELT→ML bridge and watch the chain complete itself
+### Step 6 — Turn on the ELT→ML bridge
 
-Turn on **`elt_to_ml_bridge_sensor`** in the `ml_pipelines` code location: **Automation → Sensors → toggle on**.
+Toggle **`elt_to_ml_bridge_sensor`** on in the `ml_pipelines` code location.
 
-That's it. Within 30 s of each ELT partition finishing, the sensor detects a new materialization of `reporting.rpt_sales_summary_by_customer`, reads its `partition_key`, and fires `ml_training_job` for that same partition. You'll see `ml_features/customer_rfm` (dbt) → `ml_features/customer_segments` (KMeans) → `ml_features/churn_predictions` (LogReg) all materialize for that day.
+Within 30s of each elt partition finishing, the sensor reads the new `reporting.rpt_sales_summary_by_customer` partition and fires `ml_training_job` for the same partition. `ml_features/customer_rfm` → `ml_features/customer_segments` → `ml_features/churn_predictions` all materialize.
 
-With the sensor **off**, the ml assets stay idle no matter what elt does — that's the layered-sensor invariant working as designed. Turn it off, drop more day-N files into `data/landing/`, watch landing + elt run while ml waits. Turn it on, and ml catches up automatically for every new partition.
+Toggle it off to stop the ml chain while elt keeps running.
 
 ---
 
@@ -256,7 +220,7 @@ LIMIT 15;
 | **Daily partitions** | Every layer — `raw_*` (Python), `staging/*`, `mart/*`, `reporting/*`, `ml_features/*`. Partition grid on every asset. Dagster passes `--vars '{"snapshot_dt":"YYYY-MM-DD"}'` into dbt; each model filters itself on that var. |
 | **Monthly source → daily pipeline** | The monthly product source lands in DuckDB via the Python asset `raw/raw_prd_info_monthly`. The dbt source `dagster_raw.prd_info` declares `meta.dagster.asset_key: ["raw", "raw_prd_info_monthly"]` so the source collapses onto that Python AssetKey — one node, not two. The staging model `stg_crm_prd_info` reads the source directly, picks the latest-available monthly snapshot on-or-before the current partition date (via an `INNER JOIN (SELECT MAX(snapshot_month))`), and carries the slow cadence forward (tagged `latest_available_source`). The first mart that bridges this slow cadence into the daily pipeline is `dim_products_history` (tagged `latest_available`). |
 | **Cross-partition bridge sensor** | `cross_partition_sensor` — tag-driven, ported from `imp_v2-dagster-etl/bhi_imp/sensor/cross_partition_sensor.py` and extended with two extra passes to cover what AC can't. Runs three passes per tick: **Pass-0** fires seed-derived partitioned staging models (`stg_erp_CUST_AZ12`, `stg_erp_PX_CAT_G1V2`) for every daily partition where a sibling daily `raw/*` asset has materialized — AC can't drive these because their only upstream is an unpartitioned seed, so `any_deps_updated()` never fires. **Pass-1** fires `latest_available_source`-tagged staging models (e.g. `stg_crm_prd_info`) once per materialized monthly source partition — prevents the 26-partition fan-out that AC would cause on a daily-partitioned stg with a monthly upstream. **Pass-2** fires `latest_available`-tagged marts (e.g. `dim_products_history`) in expansion mode using the intersection of exact-match daily deps so the bridging mart never stalls waiting for a monthly source update. |
-| **AutomationCondition.eager()** | Every partitioned dbt asset carries it EXCEPT models tagged `latest_available` OR `latest_available_source` — both are driven by `cross_partition_sensor`. AC handles the standard case: daily raw/* → daily staging → daily mart → daily reporting. The rule is `code_version_change \| eager_with_lookback` with a **365-day lookback window** so historical demo partitions qualify; see Troubleshooting for how to extend the window past 2027-04-27. Ported from `imp_v2-dagster-etl`. |
+| **AutomationCondition.eager()** | Every partitioned dbt asset carries it EXCEPT models tagged `latest_available` OR `latest_available_source` — both are driven by `cross_partition_sensor`. AC handles the standard case: daily raw/* → daily staging → daily mart → daily reporting. The rule is `missing_in_window \| code_version_change \| eager_with_lookback` with a **7-day lookback window** (widen in `assets/dbt.py` for longer demo ranges). The `missing_in_window` branch fires any missing partition in the window regardless of sensor-enable order — this bypasses the `since_last_handled()` cold-start trap. Ported from `imp_v2-dagster-etl`. |
 | **Monthly partition** | `raw_prd_info_monthly` — a separate partition grid with month-start keys. |
 | **Backfills** | Click **Backfill** on any partitioned asset. Runs execute serially thanks to the `duckdb_writer` tag concurrency limit. `BackfillPolicy.multi_run()` on the dbt assets means each partition becomes its own run (visible in the runs tab). |
 | **File-arrival sensor** | `landing_file_sensor` — one sensor routes both daily AND monthly files to the right job. |
@@ -282,12 +246,6 @@ The project is **entirely sensor-driven** now that every layer is partitioned. S
 | elt → ml (cross-code-location) | `elt_to_ml_bridge_sensor` (ml_pipelines) | Listens for new partitions of `reporting.rpt_sales_summary_by_customer`, fires `ml_training_job` with the same `partition_key`. Turn it **off** to stop the ml chain while elt keeps running. |
 
 Each sensor is independently togglable. Turn off the ml bridge to stop the ml chain from auto-firing while elt keeps running. Turn off the AC sensor to stop the cascade while landing keeps ingesting. That's the "layered sensor" pattern: every boundary between responsibilities is an explicit, disablable gate.
-
-### Why enable the AC sensors BEFORE `landing_file_sensor`?
-
-Dagster's `AutomationCondition.eager()` wraps its trigger clause in `.since_last_handled()`, which on the AC sensor's very first tick (`initial_evaluation()`) will NOT fire for partitions that were missing before the sensor existed. Both reference projects (`imp_v2-dagster-etl` and `fpa-finance_mart_w_data_vault`) inherit this safeguard; they get away with it in production because their sensors are always-on (`default_status=RUNNING`), so upstream materializations always land AFTER the sensor is already ticking.
-
-We reproduce that invariant by enabling the AC sensors first (Step 2 of the demo), letting the first tick record a baseline ("everything missing, nothing newly-updated"), THEN turning on `landing_file_sensor` (Step 3). When `raw/*` materialize, the NEXT AC tick sees them as `any_deps_updated` and cascades naturally — no fan-out, no bootstrap gap.
 
 ---
 
@@ -361,7 +319,7 @@ Tune them up or down to match what "fresh enough" means for your pipeline. No se
 - **"Binder Error: Cannot compare values of type VARCHAR and type DATE"** — means a Dagster-landed raw table has `snapshot_date` as VARCHAR but the dbt model is comparing it to a DATE. Every staging dbt model does `snapshot_date::DATE AS snapshot_date` in the SELECT and `snapshot_date::DATE = '{{ var(...) }}'::DATE` in the WHERE; if you add a new source or staging model, follow that pattern.
 - **Backfill produces a run per partition but they all queue** — expected: `duckdb_writer` concurrency limit is 1 so runs serialize. Backfills of many partitions take time linearly; switch to a real warehouse to parallelize.
 - **Fresh slate** — `make reset-demo` stops the stack and returns the repo to a just-cloned state (see "Keeping the repo clean for the next person"). For a lighter wipe that keeps landing files, use `make wipe`.
-- **`AutomationCondition.eager()` 7-day lookback window** — the per-layer AutomationCondition in `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py` is composed as `eager().without(in_latest_time_window()) & in_latest_time_window(lookback_delta=timedelta(days=7))`. Because `scripts/rebase_day1_csvs.sh` anchors day-1 at **today − 3** and the Faker generator in `--relative-to-today` mode adds **today − 2** and **today − 1**, all three demo partitions fall comfortably inside that 7-day window. If you generate partitions further back than 7 days (e.g. to replay a longer history), either rebase day-1 closer to those dates, or widen `timedelta(days=7)` in `get_automation_condition` to a value that covers your range. In production you'd usually keep this window tight (a few days) because only very recent partitions are ever in play.
+- **`AutomationCondition.eager()` 7-day lookback window** — in `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py`. The `rebase_day1_csvs.sh` script + the Faker generator's `--relative-to-today` mode keep all three demo partitions inside this window. If you generate partitions further back than 7 days, either rebase day-1 closer to those dates, or widen `timedelta(days=7)` in `get_automation_condition`.
 
 ---
 
