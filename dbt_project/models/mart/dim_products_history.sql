@@ -15,6 +15,19 @@
 -- the latest monthly `stg_crm_prd_info` snapshot until a newer one
 -- arrives. Downstream marts / reporting consume this daily view via
 -- normal AutomationCondition.eager() — they don't need the tag.
+--
+-- `stg_crm_prd_info` is only materialized on the monthly-source key
+-- days (e.g. 2026-04-01 for the April monthly). For every other daily
+-- partition we want to pick its LATEST snapshot_date on-or-before the
+-- current partition — that's the cross-cadence bridge semantics.
+-- `stg_erp_PX_CAT_G1V2` is daily and stamps snapshot_date = current
+-- partition, so it's joined on the daily exact key, but the product
+-- master comes from whatever monthly snapshot is "currently in effect."
+WITH latest_prd AS (
+    SELECT MAX(snapshot_date) AS snapshot_date
+    FROM {{ ref('stg_crm_prd_info') }}
+    WHERE snapshot_date <= '{{ var("snapshot_dt") }}'::DATE
+)
 SELECT
     ROW_NUMBER() OVER (ORDER BY pn.prd_start_dt, pn.prd_key) AS product_key,
     pn.prd_id AS product_id,
@@ -29,10 +42,10 @@ SELECT
     pn.prd_start_dt AS start_date,
     pn.prd_end_dt AS end_date,
     CASE WHEN pn.prd_end_dt IS NULL THEN TRUE ELSE FALSE END AS is_current,
-    pn.snapshot_date AS snapshot_date,
+    '{{ var("snapshot_dt") }}'::DATE AS snapshot_date,
     CURRENT_TIMESTAMP AS dwh_create_date
 FROM {{ ref('stg_crm_prd_info') }} pn
+INNER JOIN latest_prd lp ON pn.snapshot_date = lp.snapshot_date
 LEFT JOIN {{ ref('stg_erp_PX_CAT_G1V2') }} pc
     ON pn.cat_id = pc.id
-    AND pc.snapshot_date = pn.snapshot_date
-WHERE pn.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
+    AND pc.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
