@@ -1,7 +1,9 @@
 """Jobs for elt_pipelines.
 
-- `dbt_seed_job`: runs `dbt seed` to load static reference tables
-  (CUST_AZ12, PX_CAT_G1V2). Trigger manually from the UI.
+- `dbt_seed_job`: materializes the two seed assets (seeds/CUST_AZ12, seeds/PX_CAT_G1V2).
+  This runs dbt via the existing @dbt_assets decorator so materialization
+  events DO show up in the UI. Trigger manually from the UI to bootstrap
+  the static reference tables.
 - `landing_daily_job`: targets the three daily-partitioned landing assets
   so users can backfill many days at once.
 - `landing_monthly_job`: targets the monthly-partitioned product-master
@@ -10,14 +12,7 @@
   trigger target for the daily-monthly bridge sensor.
 """
 
-from dagster import (
-    AssetSelection,
-    OpExecutionContext,
-    define_asset_job,
-    job,
-    op,
-)
-from dagster_dbt import DbtCliResource
+from dagster import AssetKey, AssetSelection, define_asset_job
 
 from elt_pipelines.constants import DUCKDB_WRITER_TAGS
 
@@ -46,33 +41,43 @@ landing_monthly_job = define_asset_job(
     description="Runs the monthly-partitioned product-master landing asset.",
 )
 
-# Asset-based job for triggering the full ELT dbt pipeline (landing → reporting).
+# Seed-only job: materializes ONLY the two dbt seed assets via the
+# existing @dbt_assets decorator. Because it targets asset keys, Dagster
+# emits proper materialization events and the seed cards turn green.
+dbt_seed_job = define_asset_job(
+    name="dbt_seed_job",
+    selection=AssetSelection.keys(
+        AssetKey(["seeds", "CUST_AZ12"]),
+        AssetKey(["seeds", "PX_CAT_G1V2"]),
+    ),
+    tags=DUCKDB_WRITER_TAGS,
+    description="Materializes the static seed assets (CUST_AZ12, PX_CAT_G1V2).",
+)
+
+# Full ELT-transformation job: the UNPARTITIONED dbt pipeline
+# (landing dbt models + staging + mart + reporting). EXCLUDES:
+#   - the partitioned Dagster-owned landing assets (raw/raw_*) — those
+#     are materialized separately by landing_{daily,monthly}_job
+#   - the seed assets (handled by dbt_seed_job)
+# Excluding them keeps the job single-partition-definition-compatible
+# (all remaining assets are unpartitioned), which Dagster requires for
+# an asset job that spans multiple layers.
 dbt_elt_job = define_asset_job(
     name="dbt_elt_job",
-    selection=AssetSelection.assets(),  # all dbt_assets in this code location
+    selection=(
+        AssetSelection.all()
+        - AssetSelection.keys(
+            AssetKey(["seeds", "CUST_AZ12"]),
+            AssetKey(["seeds", "PX_CAT_G1V2"]),
+            AssetKey(["raw", "raw_sales_details"]),
+            AssetKey(["raw", "raw_cust_info"]),
+            AssetKey(["raw", "raw_loc_a101"]),
+            AssetKey(["raw", "raw_prd_info_monthly"]),
+        )
+    ),
     tags=DUCKDB_WRITER_TAGS,
-    description="Runs every dbt model in the elt code location (landing→reporting).",
+    description="Runs the unpartitioned dbt ELT pipeline (landing dbt models → staging → mart → reporting).",
 )
-
-
-@op(required_resource_keys={"dbt"}, tags=DUCKDB_WRITER_TAGS)
-def run_dbt_seed(context: OpExecutionContext) -> None:
-    """Load static reference seeds (CUST_AZ12, PX_CAT_G1V2) into DuckDB."""
-    dbt: DbtCliResource = context.resources.dbt
-    invocation = dbt.cli(["seed"], context=context)
-    for _ in invocation.stream():
-        pass
-    if not invocation.is_successful():
-        raise Exception("dbt seed failed — check logs.")
-
-
-@job(
-    name="dbt_seed_job",
-    tags=DUCKDB_WRITER_TAGS,
-    description="Runs `dbt seed` to populate static reference tables.",
-)
-def dbt_seed_job() -> None:
-    run_dbt_seed()
 
 
 all_jobs = [landing_daily_job, landing_monthly_job, dbt_elt_job, dbt_seed_job]
