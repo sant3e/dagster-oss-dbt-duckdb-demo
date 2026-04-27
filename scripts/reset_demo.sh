@@ -5,13 +5,13 @@
 #   1. Stops and removes the Dagster docker stack (`docker compose down`).
 #   2. Wipes runtime state: DuckDB file, Dagster SQLite + history + schedules
 #      + compute logs, dbt target/ and dbt_packages/, ML artifacts.
-#   3. Removes any landing files in data/landing/ that are NOT one of the
-#      four day-1 files that ship with the repo.
+#   3. Restores the day-1 template CSVs in data/landing/ by removing any
+#      untracked CSVs (Faker output, rebase-renamed copies) and `git checkout`-ing
+#      the tracked ones back to their committed contents.
 #   4. Removes any files in future_landing_data/ EXCEPT README.md.
 #
 # What it does NOT touch:
-#   - The four day-1 landing files (cust_info_2026_04_01.csv,
-#     loc_a101_2026_04_01.csv, prd_info_2026_04.csv, sales_details_2026_04_01.csv).
+#   - The 4 day-1 template CSVs that ship in git (restored, not deleted).
 #   - Any .py / .sql / config file in the repo.
 #   - The dbt seed CSVs.
 #   - Docker IMAGES (use `docker compose build` to recreate them; or
@@ -37,28 +37,27 @@ rm -rf dagster_home/history \
 rm -rf dbt_project/target dbt_project/dbt_packages dbt_project/logs
 rm -f  dbt_project/.user.yml
 
-echo "Step 3/4  Pruning non-day-1 landing files..."
-# Keep only the 4 day-1 files + the .gitkeep.
-KEEP=(
-  "cust_info_2026_04_01.csv"
-  "loc_a101_2026_04_01.csv"
-  "prd_info_2026_04.csv"
-  "sales_details_2026_04_01.csv"
-  ".gitkeep"
-)
+echo "Step 3/4  Restoring day-1 template CSVs in data/landing/..."
+# The template files are tracked in git. After each demo run the landing
+# folder may contain renamed template files (rebase_day1_csvs.sh moves them
+# to today-3) plus any Faker-generated CSVs the user copied in. We wipe
+# every CSV that isn't tracked in git, then restore the tracked ones to
+# exactly what the repo ships.
 if [[ -d data/landing ]]; then
-  for entry in data/landing/* data/landing/.[!.]*; do
+  # Remove every .csv in data/landing/ that git doesn't track. `git
+  # ls-files` lists only tracked files, so anything missing from it is
+  # either a rebased copy or a Faker output — both safe to delete.
+  tracked_csvs="$(git ls-files data/landing/ | grep '\.csv$' || true)"
+  for entry in data/landing/*.csv; do
     [[ -e "$entry" ]] || continue
-    base="$(basename "$entry")"
-    keep=0
-    for k in "${KEEP[@]}"; do
-      if [[ "$base" == "$k" ]]; then keep=1; break; fi
-    done
-    if [[ $keep -eq 0 ]]; then
-      echo "  removing data/landing/$base"
+    if ! printf '%s\n' "$tracked_csvs" | grep -qx "$entry"; then
+      echo "  removing $entry"
       rm -f "$entry"
     fi
   done
+  # Restore the tracked template files to their committed contents (undoes
+  # any snapshot_date column rewrites left by the rebase script).
+  git checkout HEAD -- data/landing/ 2>/dev/null || true
 fi
 
 echo "Step 4/4  Cleaning future_landing_data/ (keeping README.md)..."
