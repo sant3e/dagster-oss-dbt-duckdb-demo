@@ -169,6 +169,23 @@ class EltDbtTranslator(DagsterDbtTranslator):
         if "latest_available" in tags or "latest_available_source" in tags:
             return None
 
+        # `missing_in_window` fires any time a partition inside the lookback
+        # window is missing AND its deps are present. This bypasses the
+        # `since_last_handled()` cold-start trap that sits inside eager() —
+        # on the very first tick of a freshly-enabled AC sensor, eager()
+        # silently suppresses pre-existing missing partitions, but this
+        # branch will pick them up. Without this, the sensor sits idle
+        # after Step 3 until something upstream re-materializes.
+        missing_in_window = (
+            AutomationCondition.in_latest_time_window(
+                lookback_delta=timedelta(days=7)
+            )
+            & AutomationCondition.missing()
+            & ~AutomationCondition.in_progress()
+            & ~AutomationCondition.any_deps_missing()
+            & ~AutomationCondition.any_deps_in_progress()
+        ).with_label("missing in 7d window")
+
         new_seed_added = (
             AutomationCondition.in_latest_time_window()
             & AutomationCondition.missing()
@@ -200,9 +217,9 @@ class EltDbtTranslator(DagsterDbtTranslator):
                 "new seed or code version changed"
             )
 
-        return (code_version_change | eager_with_lookback).with_label(
-            "code version changed or eager"
-        )
+        return (
+            missing_in_window | code_version_change | eager_with_lookback
+        ).with_label("missing or code version changed or eager")
 
     def get_freshness_policy(self, dbt_resource_props):
         """Attach a FreshnessPolicy to every partitioned ELT dbt model.
