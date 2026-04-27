@@ -135,7 +135,20 @@ Files land in `future_landing_data/`. The generator is idempotent across invocat
 
 ### Step 5 — Run the ML pipeline
 
-Turn on **`customer_rfm_updated_sensor`** in the `ml_pipelines` code location. After the ELT has produced `reporting.rpt_sales_summary_by_customer`, the ml_features dbt model `customer_rfm` materializes, which triggers the ML training job producing `ml_features.customer_segments` (KMeans) and `ml_features.churn_predictions` (LogReg + serialized joblib model at `/warehouse/artifacts/churn_model.joblib`).
+The ML side doesn't auto-fire just because ELT finished. `customer_rfm` is owned by `ml_pipelines` and nothing has materialized it yet, so you have to kick it off once. Two paths — both end in the same state:
+
+**Path A — sensor-driven (shows the cross-location sensor feature):**
+
+1. Turn on **`customer_rfm_updated_sensor`** in the `ml_pipelines` code location (Automation → Sensors).
+2. Go to **Assets → `ml_features/customer_rfm` → Materialize**. This runs the dbt model.
+3. Within 30 s the sensor notices the materialization and automatically fires **`ml_training_job`**, which produces `ml_features.customer_segments` (KMeans) and `ml_features.churn_predictions` (LogReg + serialized joblib model at `/warehouse/artifacts/churn_model.joblib`).
+
+**Path B — manual (simpler, no sensor needed):**
+
+1. Go to **Jobs → `ml_training_job` → Launch Run** in the `ml_pipelines` code location.
+2. The job runs `customer_rfm` first, then `customer_segments` and `churn_predictions` in one go.
+
+Path A is the better demo because it exercises the cross-location sensor; Path B is the fastest way to see ML outputs in the UI.
 
 ---
 
