@@ -429,8 +429,10 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
             f"latest={[n for n, _ in deps['latest_available']]}"
         )
 
-        if not is_expansion_case(deps, asset_info):
-            context.log.info(f"  not an expansion case; skipping")
+        # Require at least one latest_available dep — otherwise this asset
+        # doesn't need expansion-mode firing; AC handles it.
+        if not deps["latest_available"]:
+            context.log.info(f"  no latest_available deps; leaving to AutomationCondition")
             continue
 
         # Collect all source partitions across every latest_available dep.
@@ -462,15 +464,22 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
             f"{target_limited[-1] if target_limited else 'none'})"
         )
 
-        # Assets the asset_name itself has already materialized for.
-        # We fire for every day in the expansion range that ISN'T already
-        # materialized for this asset AND hasn't been fired recently.
-        # In this demo there is a single latest_available asset
-        # (stg_crm_prd_info) and it shares its run with the rest of the
-        # partitioned landing+staging via dbt_elt_landing_job. So we use
-        # the sensor's own cursor to dedupe, not the asset's materialization
-        # record (the dbt_elt_landing_job materializes landing models, not
-        # stg_crm_prd_info — that comes later via AutomationCondition).
+        # Pre-fetch partitions for exact-match deps once (avoid re-fetching per day).
+        exact_dep_partitions: Dict[str, set] = {}
+        for dep_name, dep_key in deps["exact_match"]:
+            try:
+                exact_dep_partitions[dep_name] = set(
+                    context.instance.get_materialized_partitions(dep_key) or []
+                )
+            except Exception:
+                exact_dep_partitions[dep_name] = set()
+            context.log.info(
+                f"  exact dep {dep_name} materialized partitions: "
+                f"{sorted(exact_dep_partitions[dep_name])[:10]}"
+                f"{'...' if len(exact_dep_partitions[dep_name]) > 10 else ''}"
+            )
+
+        # Pre-fetch asset's own materialized partitions.
         asset_key = _asset_key_from_dbt_node(manifest, node_id)
         try:
             already_materialized = set(
@@ -480,8 +489,9 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
             already_materialized = set()
 
         for partition in target_limited:
-            # Skip if a source doesn't actually cover this partition.
-            has_source = False
+            # Every latest_available dep must have SOME partition on-or-before
+            # this target day (the "latest available" rule).
+            latest_ok = True
             for _source_name, source_key in deps["latest_available"]:
                 try:
                     sp = list(
@@ -489,10 +499,26 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
                     )
                 except Exception:
                     sp = []
-                if find_latest_available_partition(sp, partition):
-                    has_source = True
+                if not find_latest_available_partition(sp, partition):
+                    latest_ok = False
                     break
-            if not has_source:
+            if not latest_ok:
+                continue
+
+            # Every exact_match dep must have EXACTLY this partition
+            # materialized. If not, downstream would blow up with missing
+            # data, so skip (AC will fire it later when the exact dep is
+            # caught up).
+            exact_ok = True
+            for dep_name, _dep_key in deps["exact_match"]:
+                if partition not in exact_dep_partitions.get(dep_name, set()):
+                    context.log.info(
+                        f"  skipping {partition}: exact dep {dep_name} "
+                        f"has no materialization for {partition} yet"
+                    )
+                    exact_ok = False
+                    break
+            if not exact_ok:
                 continue
 
             # Skip if we already fired this (asset, partition) in the last hour.
