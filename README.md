@@ -84,11 +84,18 @@ Turn on **`landing_file_sensor`** in the UI (Automation → Sensors → toggle o
 
 These populate `raw.sales_details`, `raw.cust_info`, `raw.loc_a101`, `raw.prd_info` in DuckDB (all with a `snapshot_date` / `snapshot_month` column carrying the partition key).
 
-### Step 3 — Watch the bridge sensor fire the ELT
+### Step 3 — Watch the cascade self-propagate via AutomationCondition + the cross-partition sensor
 
-Turn on **`daily_monthly_bridge_sensor`**. It notices that all three daily upstreams are ready for `2026-04-01` AND the monthly upstream has been materialized for month-of(2026-04-01), so it fires the **`dbt_elt_job`** for that day with `partition_key=2026-04-01`. The dbt pipeline builds landing → staging → mart → reporting in DuckDB — each model filtered to that single partition via `{{ var('snapshot_dt') }}`, and incrementally written with `delete+insert` on `snapshot_date`.
+Turn on Dagster's built-in **`default_automation_condition_sensor`** (Automation → Sensors). This sensor evaluates `AutomationCondition.eager()` rules, which are attached to every partitioned asset downstream of landing EXCEPT the two that are tagged for sensor-gated handling (more below).
 
-Freshness checks are evaluated by Dagster's built-in `default_automation_condition_sensor` (on by default in 1.12+). If it's off in your deployment, toggle it on from Automation → Sensors so the **Checks** tab of each asset gets freshness updates (PASS / WARN / FAIL) on every tick.
+Turn on **`cross_partition_sensor`** too. This is a tag-driven sensor ported 1:1 from [`imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`](https://github.com/booking-com/… — internal). Reads the dbt manifest for models tagged `latest_available` (assets that consume a slower-cadence upstream) and runs them in "expansion mode": fires one partition per day for the N most recent days, reusing the latest-available slow-cadence snapshot until a newer one arrives. It's what keeps the daily pipeline moving when the monthly source hasn't refreshed yet.
+
+With both sensors on, partition `2026-04-01` cascades automatically end-to-end:
+- `raw/*` landings already materialized (Step 2).
+- `AutomationCondition.eager()` on `landing/raw_crm_*` (the ones fed by daily sources) fires those for 2026-04-01.
+- `cross_partition_sensor` fires `landing/raw_crm_prd_info` (the `latest_available_source`) and `staging/stg_crm_prd_info` (the `latest_available` consumer) for 2026-04-01 using the April monthly snapshot.
+- `AutomationCondition.eager()` on the rest of staging, all of mart, all of reporting cascades down per-partition.
+- Every dbt model lands with `snapshot_date = 2026-04-01` and 60,398 / 18,484 / 397 rows in the respective tables.
 
 ### Step 4 — Drop event-day files to see the daily cadence in action
 
@@ -120,7 +127,9 @@ cp future_landing_data/*.csv data/landing/
 You'll see (within 30 s):
 
 1. `landing_file_sensor` fires new landing runs: one daily run per `YYYY_MM_DD` triple of files found, one monthly run per `YYYY_MM` file found.
-2. `daily_monthly_bridge_sensor` fires `dbt_elt_job` for every day whose month has a materialized monthly partition. If you only drop daily files for May but no May monthly file, the bridge sensor **waits** — exactly the cadence-mismatch pattern it exists to demonstrate.
+2. `AutomationCondition.eager()` on daily-source landing models (`landing/raw_crm_cust_info`, `landing/raw_crm_sales_details`, `landing/raw_erp_LOC_A101`) auto-fires each daily partition as its upstream `raw/*` asset materializes.
+3. `cross_partition_sensor` ticks, sees the new daily dates, and fires the `latest_available` chain (`landing/raw_crm_prd_info` and `staging/stg_crm_prd_info`) for each new day, reusing the **latest-available monthly snapshot** (whichever `snapshot_month ≤ day`). If you only drop daily files for May but no May monthly file, the sensor STILL fires May's daily partitions — using April's monthly. When May's monthly file eventually lands, subsequent May partitions switch to the May snapshot automatically.
+4. The rest of staging, mart, and reporting cascade per-partition via `AutomationCondition.eager()`.
 
 #### Other generator invocations
 
@@ -228,7 +237,8 @@ LIMIT 15;
 | **Monthly partition** | `raw_prd_info_monthly` — a separate partition grid with month-start keys. |
 | **Backfills** | Click **Backfill** on any partitioned asset. Runs execute serially thanks to the `duckdb_writer` tag concurrency limit. `BackfillPolicy.multi_run()` on the dbt assets means each partition becomes its own run (visible in the runs tab). |
 | **File-arrival sensor** | `landing_file_sensor` — one sensor routes both daily AND monthly files to the right job. |
-| **Cross-partition bridge sensor** | `daily_monthly_bridge_sensor` — fires `dbt_elt_job` with `partition_key=D` only when all three daily landings for D AND the monthly landing for month-of(D) are ready. |
+| **Cross-partition bridge sensor** | `cross_partition_sensor` — tag-driven port of `imp_finance_mart/bhi_imp/sensor/cross_partition_sensor.py`. Scans the dbt manifest for `latest_available` / `latest_available_source` tags and fires daily expansion runs so downstream daily assets keep moving even when their monthly upstream hasn't refreshed. |
+| **AutomationCondition.eager()** | Every partitioned asset downstream of landing carries it (via the dbt translator's `get_automation_condition`), EXCEPT assets tagged `latest_available_source` / `latest_available` (those are sensor-gated). |
 | **Manual dbt-seed job** | `dbt_seed_job` in Jobs — non-partitioned (static reference data). |
 | **Cross-location asset sensor** | `elt_to_ml_bridge_sensor` (ml_pipelines) — listens for new partitions of `reporting.rpt_sales_summary_by_customer` in the elt_pipelines code location and fires `ml_training_job` with the same `partition_key`. |
 | **ML fan-out** | `customer_segments` (KMeans) + `churn_predictions` (LogisticRegression) both consume `customer_rfm` within a single partition. |
@@ -243,8 +253,10 @@ The project is **entirely sensor-driven** now that every layer is partitioned. T
 | Hop | Sensor | What it does |
 |---|---|---|
 | Filesystem → landing assets | `landing_file_sensor` | Detects new `<prefix>_YYYY_MM_DD.csv` / `prd_info_YYYY_MM.csv` files, emits one `RunRequest` per file with the right `partition_key` + job. |
-| landing → ELT (elt_pipelines) | `daily_monthly_bridge_sensor` | Waits until all three daily landings for day D AND the monthly landing for month-of(D) are ready, then fires `dbt_elt_job` with `partition_key=D`. Bridges the daily/monthly cadence mismatch. |
-| elt → ml (cross-code-location) | `elt_to_ml_bridge_sensor` (ml_pipelines) | Listens for new partitions of `reporting.rpt_sales_summary_by_customer`, fires `ml_training_job` with the same `partition_key`. |
+| landing (daily-source) | `AutomationCondition.eager()` | Landing dbt models fed by daily raw sources (`raw_crm_cust_info`, `raw_crm_sales_details`, `raw_erp_LOC_A101`) auto-fire per partition when their upstream materializes. |
+| landing (slow-cadence source) | `cross_partition_sensor` | Models tagged `latest_available_source` + `latest_available` (`raw_crm_prd_info`, `stg_crm_prd_info`) are fired in expansion mode by the sensor — one run per day for the N most recent days, reusing the latest-available monthly snapshot. |
+| staging / mart / reporting | `AutomationCondition.eager()` | Auto-cascade per-partition once their upstreams land. |
+| elt → ml (cross-code-location) | `elt_to_ml_bridge_sensor` (ml_pipelines) | Listens for new partitions of `reporting.rpt_sales_summary_by_customer`, fires `ml_training_job` with the same `partition_key`. Turn it **off** to stop the ml chain while elt keeps running. |
 
 Each sensor is independently togglable. Turn off the ml bridge to stop the ml chain from auto-firing while elt keeps running. Turn off the elt bridge to stop the elt chain from auto-firing while landing keeps ingesting. That's the "layered sensor" pattern: every boundary between responsibilities is an explicit, disablable gate.
 
@@ -427,7 +439,7 @@ We replace three real components with cheaper stand-ins so the whole thing runs 
 - Daily `delete+insert` incremental dbt models with `snapshot_date` as the partition watermark — exactly how a real Snowflake/BigQuery ELT is structured.
 - The `--vars snapshot_dt` plumbing: Dagster reads `context.partition_time_window.start` and hands it to dbt; every model filters on `{{ var("snapshot_dt") }}`.
 - The latest-available-on-or-before pattern for monthly-into-daily joins (`raw_crm_prd_info`).
-- Cadence-bridging (`daily_monthly_bridge_sensor`) — exactly how you'd coordinate daily downstreams against a monthly upstream in any real setup.
+- Cadence-bridging via tag-driven `cross_partition_sensor` + `latest_available` / `latest_available_source` tags — exactly how `imp_finance_mart` coordinates daily downstreams against slower-cadence upstreams in production.
 - The dbt project structure and group-based access boundaries.
 
 **What you'd swap for production:**
