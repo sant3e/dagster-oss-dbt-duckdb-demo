@@ -1,4 +1,14 @@
--- Sales summary by customer — DuckDB date_diff() replaces Snowflake DATEDIFF().
+{{
+    config(
+        materialized='incremental',
+        unique_key='snapshot_date',
+        incremental_strategy='delete+insert',
+    )
+}}
+
+-- Sales summary by customer for the current partition — DuckDB date_diff()
+-- replaces Snowflake DATEDIFF(). Aggregation happens within the partition
+-- since fct_sales and dim_customers are both filtered to it.
 SELECT
     c.customer_key,
     c.customer_id,
@@ -13,10 +23,13 @@ SELECT
     AVG(f.sales_amount) AS avg_order_value,
     MIN(f.order_date) AS first_order_date,
     MAX(f.order_date) AS last_order_date,
-    date_diff('day', MIN(f.order_date), MAX(f.order_date)) AS days_since_first_order
+    date_diff('day', MIN(f.order_date), MAX(f.order_date)) AS days_since_first_order,
+    '{{ var("snapshot_dt") }}'::DATE AS snapshot_date
 FROM {{ ref('fct_sales') }} f
 JOIN {{ ref('dim_customers') }} c
     ON f.customer_key = c.customer_key
+    AND c.snapshot_date = f.snapshot_date
+WHERE f.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
 GROUP BY
     c.customer_key,
     c.customer_id,

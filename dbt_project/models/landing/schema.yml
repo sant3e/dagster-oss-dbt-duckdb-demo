@@ -2,16 +2,20 @@ version: 2
 
 models:
   - name: raw_crm_cust_info
-    description: "Current customer master (latest snapshot per cst_id) from Dagster-landed daily CSVs"
+    description: "Daily customer master filtered to the current partition (from Dagster-landed daily CSVs)"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [cst_id, snapshot_date]
+          # Source data has a handful of duplicate cst_ids on the same day;
+          # warn so the demo pipeline still completes. In production you'd
+          # fix the source or add dedup logic in this model.
+          config:
+            severity: warn
     columns:
       - name: cst_id
         description: "Customer ID"
-        # Real sant3e data has a handful of null cst_ids; we configure this
-        # as a warning so the demo pipeline still completes. The red 'warned'
-        # badge in the Dagster UI is pedagogically useful.
+        # Real sant3e data has a handful of null cst_ids; warn so the demo pipeline still completes.
         tests:
-          - unique:
-              severity: warn
           - not_null:
               severity: warn
       - name: cst_key
@@ -19,29 +23,35 @@ models:
         tests:
           - not_null
       - name: snapshot_date
-        description: "Date of the snapshot that produced this row"
+        description: "Partition date this row belongs to"
         tests:
           - not_null
 
   - name: raw_crm_prd_info
-    description: "Current product master (latest snapshot_month per prd_id) from Dagster-landed monthly CSV"
+    description: "Product master for the current partition — latest monthly snapshot on-or-before the partition date"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [prd_id, snapshot_date]
     columns:
       - name: prd_id
         description: "Product ID"
         tests:
-          - unique
           - not_null
       - name: prd_key
         description: "Product key"
         tests:
           - not_null
       - name: snapshot_month
-        description: "First-of-month date for the snapshot that produced this row"
+        description: "First-of-month date of the monthly source record used for this partition"
+        tests:
+          - not_null
+      - name: snapshot_date
+        description: "Daily partition date this row was projected onto"
         tests:
           - not_null
 
   - name: raw_crm_sales_details
-    description: "Sales transactions (latest snapshot per order+product) from Dagster-landed daily CSVs"
+    description: "Daily sales transactions filtered to the current partition"
     columns:
       - name: sls_ord_num
         description: "Sales order number"
@@ -60,7 +70,7 @@ models:
           - not_null
 
   - name: raw_erp_CUST_AZ12
-    description: "Static ERP customer reference (seeded)"
+    description: "Static ERP customer reference (seeded, not partitioned)"
     columns:
       - name: CID
         description: "Customer ID"
@@ -69,7 +79,10 @@ models:
           - not_null
 
   - name: raw_erp_LOC_A101
-    description: "Current customer location master (latest snapshot per CID) from Dagster-landed daily CSVs"
+    description: "Daily customer location master filtered to the current partition"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [CID, snapshot_date]
     columns:
       - name: CID
         description: "Customer ID"
@@ -80,7 +93,7 @@ models:
           - not_null
 
   - name: raw_erp_PX_CAT_G1V2
-    description: "Static ERP product category taxonomy (seeded)"
+    description: "Static ERP product category taxonomy (seeded, not partitioned)"
     columns:
       - name: ID
         description: "Category ID"

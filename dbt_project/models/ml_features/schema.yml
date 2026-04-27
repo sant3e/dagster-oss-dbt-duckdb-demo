@@ -2,19 +2,24 @@ version: 2
 
 models:
   - name: customer_rfm
-    description: "RFM (Recency / Frequency / Monetary) customer features consumed by ml_pipelines"
+    description: "RFM (Recency / Frequency / Monetary) features for the current partition, consumed by ml_pipelines"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customer_key, snapshot_date]
     columns:
       - name: customer_key
-        description: "Surrogate key joining back to dim_customers"
-        tests: [unique, not_null]
+        description: "Surrogate key joining back to dim_customers within the same snapshot_date"
+        tests: [not_null]
       - name: customer_id
         tests: [not_null]
       - name: recency_days
-        description: "Days between the customer's last order and the dataset's most recent order"
+        description: "Days between the partition date and the customer's last order"
         tests: [not_null]
       - name: frequency
-        description: "Count of orders placed by the customer"
+        description: "Count of orders placed by the customer within the partition"
         tests: [not_null]
       - name: monetary
-        description: "Total sales amount attributed to the customer"
+        description: "Total sales amount attributed to the customer within the partition"
+        tests: [not_null]
+      - name: snapshot_date
         tests: [not_null]

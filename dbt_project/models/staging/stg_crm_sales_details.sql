@@ -1,6 +1,17 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='snapshot_date',
+        incremental_strategy='delete+insert',
+    )
+}}
+
 -- Ported from Snowflake:
 --   LENGTH(CAST(x AS STRING))  → length(x::VARCHAR)
 --   TO_DATE(CAST(x AS STRING), 'YYYYMMDD') → strptime(x::VARCHAR, '%Y%m%d')::DATE
+-- The upstream landing model is already filtered to the current partition;
+-- we pass `snapshot_date` through unchanged so downstream marts can keep
+-- filtering uniformly.
 WITH raw_data AS (
     SELECT
         sls_ord_num,
@@ -26,8 +37,10 @@ WITH raw_data AS (
         END AS sls_due_dt,
         sls_sales,
         sls_quantity,
-        sls_price
+        sls_price,
+        snapshot_date
     FROM {{ ref('raw_crm_sales_details') }}
+    WHERE snapshot_date = '{{ var("snapshot_dt") }}'::DATE
 ),
 step1_corrected_price AS (
     SELECT *,
@@ -67,5 +80,6 @@ SELECT
     corrected_sales AS sls_sales,
     sls_quantity,
     final_price AS sls_price,
+    snapshot_date,
     CURRENT_TIMESTAMP AS dwh_create_date
 FROM step3_final_price

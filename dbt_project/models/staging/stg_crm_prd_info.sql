@@ -1,4 +1,15 @@
--- LEAD()/INTERVAL supported in DuckDB; no changes needed from source.
+{{
+    config(
+        materialized='incremental',
+        unique_key='snapshot_date',
+        incremental_strategy='delete+insert',
+    )
+}}
+
+-- Product master — the upstream landing model already picks the latest
+-- monthly snapshot on-or-before the daily partition and emits
+-- snapshot_date = the daily partition. We filter to that snapshot_date
+-- and derive an SCD-style prd_end_dt via LEAD() within the snapshot.
 SELECT
     prd_id AS prd_id,
     REPLACE(SUBSTRING(prd_key, 1, 5), '-', '_') AS cat_id,
@@ -17,5 +28,7 @@ SELECT
         PARTITION BY REPLACE(SUBSTRING(prd_key, 7), '-', '_')
         ORDER BY prd_start_dt
     ) - INTERVAL '1 day')::DATE AS prd_end_dt,
+    snapshot_date,
     CURRENT_TIMESTAMP AS dwh_create_date
 FROM {{ ref('raw_crm_prd_info') }}
+WHERE snapshot_date = '{{ var("snapshot_dt") }}'::DATE

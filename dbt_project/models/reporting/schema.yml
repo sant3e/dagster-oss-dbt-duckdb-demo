@@ -2,12 +2,23 @@ version: 2
 
 models:
   - name: rpt_sales_summary_by_customer
-    description: "Per-customer sales aggregates used by ml_pipelines for RFM features"
+    description: "Per-customer sales aggregates for the current partition (consumed by ml_pipelines for RFM)"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customer_key, snapshot_date]
     columns:
       - name: customer_key
         tests: [not_null]
+      - name: snapshot_date
+        tests: [not_null]
+
   - name: rpt_sales_performance_by_product
-    description: "Per-product sales performance and profit"
+    description: "Per-product sales performance and profit for the current partition"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [product_key, snapshot_date]
     columns:
       - name: product_key
+        tests: [not_null]
+      - name: snapshot_date
         tests: [not_null]

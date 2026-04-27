@@ -1,19 +1,15 @@
--- Daily-snapshotted customer location master from ERP.
--- Keeps latest snapshot per customer.
-WITH ranked AS (
-    SELECT
-        CID::VARCHAR AS CID,
-        CNTRY::VARCHAR AS CNTRY,
-        snapshot_date::DATE AS snapshot_date,
-        ROW_NUMBER() OVER (
-            PARTITION BY CID
-            ORDER BY snapshot_date DESC
-        ) AS rn
-    FROM {{ source('dagster_raw', 'loc_a101') }}
-)
+{{
+    config(
+        materialized='incremental',
+        unique_key='snapshot_date',
+        incremental_strategy='delete+insert',
+    )
+}}
+
+-- Daily ERP customer location master, filtered to the current partition.
 SELECT
-    CID,
-    CNTRY,
-    snapshot_date
-FROM ranked
-WHERE rn = 1
+    CID::VARCHAR AS CID,
+    CNTRY::VARCHAR AS CNTRY,
+    snapshot_date::DATE AS snapshot_date
+FROM {{ source('dagster_raw', 'loc_a101') }}
+WHERE snapshot_date::DATE = '{{ var("snapshot_dt") }}'::DATE

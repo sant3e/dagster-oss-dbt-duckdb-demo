@@ -2,27 +2,47 @@ version: 2
 
 models:
   - name: dim_customers
-    description: "Customer dimension (CRM + ERP merged, standardized)"
+    description: "Customer dimension for the current partition (CRM + ERP merged, standardized)"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [customer_key, snapshot_date]
     columns:
       - name: customer_key
-        tests: [unique, not_null]
+        tests: [not_null]
       - name: customer_id
         # Inherits nulls from upstream (real sant3e data has a few missing cst_ids).
         tests:
           - not_null:
               severity: warn
+      - name: snapshot_date
+        tests: [not_null]
+
   - name: dim_products_history
-    description: "Product dimension — full SCD history"
+    description: "Product dimension (full SCD history) for the current partition"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [product_key, snapshot_date]
     columns:
       - name: product_key
-        tests: [unique, not_null]
+        tests: [not_null]
+      - name: snapshot_date
+        tests: [not_null]
+
   - name: dim_products
-    description: "Current-products-only view of dim_products_history"
+    description: "Current-products-only view of dim_products_history for the current partition"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [product_number, snapshot_date]
     columns:
       - name: product_number
-        tests: [unique, not_null]
+        tests: [not_null]
+      - name: snapshot_date
+        tests: [not_null]
+
   - name: fct_sales
-    description: "Sales fact table"
+    description: "Sales fact table for the current partition"
     columns:
       - name: order_number
+        tests: [not_null]
+      - name: snapshot_date
         tests: [not_null]

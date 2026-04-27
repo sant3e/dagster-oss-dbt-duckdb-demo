@@ -1,7 +1,14 @@
--- DuckDB-compatible: upper/lower/replace/trim supported.
--- INITCAP is not available in DuckDB 1.x — for the catch-all branch we
--- fall back to a simple trimmed value. For a demo this is fine; add a
--- title-case macro later if you care about cosmetics.
+{{
+    config(
+        materialized='incremental',
+        unique_key='snapshot_date',
+        incremental_strategy='delete+insert',
+    )
+}}
+
+-- DuckDB-compatible: upper/lower/replace/trim supported. INITCAP is not
+-- available in DuckDB 1.x — for the catch-all branch we fall back to a
+-- simple trimmed value. Filtered to the current partition.
 SELECT
     REPLACE(CID, '-', '') AS CID,
     CASE
@@ -12,5 +19,7 @@ SELECT
         WHEN CNTRY IS NULL OR UPPER(TRIM(CNTRY)) IN ('N/A', '', 'null') THEN 'N/A'
         ELSE TRIM(CNTRY)
     END AS CNTRY,
+    snapshot_date,
     CURRENT_TIMESTAMP AS dwh_create_date
 FROM {{ ref('raw_erp_LOC_A101') }}
+WHERE snapshot_date = '{{ var("snapshot_dt") }}'::DATE

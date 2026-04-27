@@ -1,3 +1,12 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='snapshot_date',
+        incremental_strategy='delete+insert',
+    )
+}}
+
+-- Product performance for the current partition.
 SELECT
     p.product_key,
     p.product_id,
@@ -15,10 +24,13 @@ SELECT
     SUM(f.quantity * p.cost) AS total_cost,
     SUM(f.sales_amount - (f.quantity * p.cost)) AS total_profit,
     MIN(f.order_date) AS first_sale_date,
-    MAX(f.order_date) AS last_sale_date
+    MAX(f.order_date) AS last_sale_date,
+    '{{ var("snapshot_dt") }}'::DATE AS snapshot_date
 FROM {{ ref('fct_sales') }} f
 JOIN {{ ref('dim_products') }} p
     ON f.product_key = p.product_key
+    AND p.snapshot_date = f.snapshot_date
+WHERE f.snapshot_date = '{{ var("snapshot_dt") }}'::DATE
 GROUP BY
     p.product_key,
     p.product_id,
