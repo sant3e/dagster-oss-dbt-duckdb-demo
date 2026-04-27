@@ -16,6 +16,7 @@ dagster_home/history/
 dagster_home/schedules/
 dagster_home/logs/
 dagster_home/compute_logs/
+dagster_home/.nux/
 *.db
 *.db-journal
 
