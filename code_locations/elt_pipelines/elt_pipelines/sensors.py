@@ -528,13 +528,13 @@ def cross_partition_sensor(context: SensorEvaluationContext) -> SensorResult:
 
     # ---- Pass 1: latest_available_source assets ----
     # These are the slow-cadence staging models whose upstream is a monthly
-    # (or irregular) source but whose partition def is daily. AC would fan
-    # them out across the entire month every time the monthly source lands
-    # (because Dagster's default partition mapping says "one monthly parent
-    # satisfies every daily child"). Instead we fire them here, one partition
-    # per day for which the monthly upstream has a latest-available-on-or-
-    # before partition, rate-limited to EXPANSION_PARTITION_LIMIT most recent
-    # days.
+    # (or irregular) source but whose partition def is daily. Native eager()
+    # does not synthesize a daily child from a sparse parent: no same-day
+    # monthly partition exists for most days, so any_deps_missing() stays
+    # TRUE and the daily stg is never fired. We supply the missing semantic
+    # here: fire the stg once per materialized monthly source partition,
+    # keyed to a daily partition, rate-limited to EXPANSION_PARTITION_LIMIT
+    # most recent days.
     for asset_info in latest_available_source_assets:
         asset_name = asset_info["name"]
         node_id = asset_info["node_id"]

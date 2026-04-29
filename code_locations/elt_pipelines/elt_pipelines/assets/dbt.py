@@ -158,11 +158,12 @@ class EltDbtTranslator(DagsterDbtTranslator):
         # Both `latest_available` and `latest_available_source` are driven
         # by cross_partition_sensor, NOT by AC:
         #  - `latest_available_source` = slow-cadence staging (e.g. stg_crm_prd_info
-        #    whose upstream is the monthly raw_prd_info_monthly). If AC ran eager()
-        #    on a daily-partitioned stg whose upstream is monthly, Dagster's default
-        #    partition mapping would treat the single monthly partition as satisfying
-        #    EVERY daily partition of the stg, producing a month-wide fan-out each
-        #    time the monthly source lands.
+        #    whose upstream is the monthly raw_prd_info_monthly). Native eager()
+        #    on a daily-partitioned stg with a monthly upstream does nothing useful:
+        #    most days have no same-day monthly partition, any_deps_missing() stays
+        #    TRUE, and the daily child is never synthesized from the sparse parent.
+        #    cross_partition_sensor supplies the missing semantic: fire the stg
+        #    once per new monthly partition.
         #  - `latest_available` = downstream mart that bridges slow-cadence into the
         #    daily grain (e.g. dim_products_history). Driven by cross_partition_sensor
         #    in expansion mode.
