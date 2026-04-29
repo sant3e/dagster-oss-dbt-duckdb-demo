@@ -58,3 +58,4 @@ future_landing_data/*
 .vscode/
 .idea/
 *.swp
+.claude/
