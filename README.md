@@ -10,16 +10,19 @@ A **local** Dagster OSS demo showcasing multi-code-location architecture, dbt + 
 
 ```
 dagster_oss_template/
-├── docker-compose.yml          4 services on one network
+├── Makefile                    one-liners for build / up / down / wipe / reset-demo
+├── docker-compose.yml          webserver + daemon + 2 gRPC code locations on one network
 ├── docker/                     Dockerfiles for webserver/daemon and code locations
 ├── dagster_home/               dagster.yaml (SQLite storage, QueuedRunCoordinator) + workspace.yaml
 ├── dbt_project/                dbt + DuckDB project, ported from sant3e
+│   ├── macros/                 shared SQL helpers
 │   ├── models/
-│   │   ├── staging/            stg_* daily-partitioned, reads dbt sources or seeds, cleaned
+│   │   ├── sources.yml         dbt sources mapped onto Dagster raw/* AssetKeys
+│   │   ├── groups.yml          elt_team, ml_team + owners
+│   │   ├── staging/            stg_* daily-partitioned, reads sources or seeds
 │   │   ├── mart/               dim_customers, dim_products, dim_products_history, fct_sales — daily-partitioned
 │   │   ├── reporting/          rpt_* daily-partitioned
-│   │   ├── ml_features/        customer_rfm (owned by ml_team) — daily-partitioned
-│   │   └── groups.yml          elt_team, ml_team + owners
+│   │   └── ml_features/        customer_rfm (owned by ml_team) — daily-partitioned
 │   └── seeds/                  static reference CSVs (CUST_AZ12, PX_CAT_G1V2 — NOT partitioned)
 ├── code_locations/
 │   ├── elt_pipelines/          gRPC server on :4000, owns the elt layers
@@ -27,16 +30,16 @@ dagster_oss_template/
 ├── data/landing/               where daily + monthly snapshot CSVs land (day 1 ships here)
 ├── future_landing_data/        scratch space for Faker-generated day-N CSVs (empty by default)
 ├── warehouse/                  DuckDB file + joblib model artifacts (created on first run)
-└── scripts/                    reset_demo.sh, wipe.sh, Faker data generator
+├── scripts/                    rebase_day1_csvs.sh, generate_future_landing_data.py, reset_demo.sh, wipe.sh
+├── docs/                       slide deck, diagrams, and a why-Dagster explainer
+└── pyproject.toml              top-level dev tooling config
 ```
-
-> **dbt packages:** `dbt_utils` is listed in `dbt_project/packages.yml` and installed automatically on container startup (runs `dbt deps` if `dbt_packages/dbt_utils/` is missing). Used for compound uniqueness tests like `(natural_key, snapshot_date)`.
 
 ---
 
 ## Quickstart
 
-Prereqs: Docker Desktop + `make`.
+Prereqs: Docker Desktop + `make` (macOS: `xcode-select --install` · Linux: ships with `build-essential` · Windows: `choco install make` or use WSL).
 
 ```bash
 git clone https://github.com/sant3e/dagster-oss-dbt-duckdb-demo.git
@@ -210,120 +213,6 @@ LIMIT 15;
 
 ---
 
-## Feature tour (mapped to the UI)
-
-| Feature | Where to find it |
-|---|---|
-| **Multi-code-location** | Deployment tab — two green locations. Asset graph stitches across them. |
-| **dbt + DuckDB** | Assets tab — `raw_* (Python) → staging → mart → reporting → ml_features`. Every dbt model is **daily-partitioned on `snapshot_date`**, incremental (`delete+insert` on `snapshot_date`). Dbt tests (including `dbt_utils.unique_combination_of_columns` for `(natural_key, snapshot_date)`) surface as asset checks. |
-| **dbt groups & access** | `dbt_project/models/groups.yml` + `+group:`/`+access:` in `dbt_project.yml`. Staging is `access: private`, mart/reporting are `public`. |
-| **Daily partitions** | Every layer — `raw_*` (Python), `staging/*`, `mart/*`, `reporting/*`, `ml_features/*`. Partition grid on every asset. Dagster passes `--vars '{"snapshot_dt":"YYYY-MM-DD"}'` into dbt; each model filters itself on that var. |
-| **Monthly source → daily pipeline** | The monthly product source lands in DuckDB via the Python asset `raw/raw_prd_info_monthly`. The dbt source `dagster_raw.prd_info` declares `meta.dagster.asset_key: ["raw", "raw_prd_info_monthly"]` so the source collapses onto that Python AssetKey — one node, not two. The staging model `stg_crm_prd_info` reads the source directly, picks the latest-available monthly snapshot on-or-before the current partition date (via an `INNER JOIN (SELECT MAX(snapshot_month))`), and carries the slow cadence forward (tagged `latest_available_source`). The first mart that bridges this slow cadence into the daily pipeline is `dim_products_history` (tagged `latest_available`). |
-| **Cross-partition bridge sensor** | `cross_partition_sensor` — tag-driven, ported from `imp_v2-dagster-etl/bhi_imp/sensor/cross_partition_sensor.py` and extended with two extra passes to cover what AC can't. Runs three passes per tick: **Pass-0** fires seed-derived partitioned staging models (`stg_erp_CUST_AZ12`, `stg_erp_PX_CAT_G1V2`) for every daily partition where a sibling daily `raw/*` asset has materialized — AC can't drive these because their only upstream is an unpartitioned seed, so `any_deps_updated()` never fires. **Pass-1** fires `latest_available_source`-tagged staging models (e.g. `stg_crm_prd_info`) once per materialized monthly source partition — native `eager()` never fires the daily stg when its only upstream is a sparse monthly asset (`any_deps_missing()` stays TRUE and the daily child is never synthesized from a sparse parent). **Pass-2** fires `latest_available`-tagged marts (e.g. `dim_products_history`) in expansion mode using the intersection of exact-match daily deps so the bridging mart never stalls waiting for a monthly source update. |
-| **AutomationCondition.eager()** | Every partitioned dbt asset carries it EXCEPT models tagged `latest_available` OR `latest_available_source` — both are driven by `cross_partition_sensor`. AC handles the standard case: daily raw/* → daily staging → daily mart → daily reporting. The rule is `missing_in_window \| code_version_change \| eager_with_lookback` with a **7-day lookback window** (widen in `assets/dbt.py` for longer demo ranges). The `missing_in_window` branch fires any missing partition in the window regardless of sensor-enable order — this bypasses the `since_last_handled()` cold-start trap. Ported from `imp_v2-dagster-etl`. |
-| **Monthly partition** | `raw_prd_info_monthly` — a separate partition grid with month-start keys. |
-| **Backfills** | Click **Backfill** on any partitioned asset. Runs execute serially thanks to the `duckdb_writer` tag concurrency limit. `BackfillPolicy.multi_run()` on the dbt assets means each partition becomes its own run (visible in the runs tab). |
-| **File-arrival sensor** | `landing_file_sensor` — one sensor routes both daily AND monthly files to the right job. |
-| **Manual dbt-seed job** | `dbt_seed_job` in Jobs — seeds only (CUST_AZ12, PX_CAT_G1V2). Static reference data, unpartitioned. Downstream `stg_erp_CUST_AZ12` / `stg_erp_PX_CAT_G1V2` staging models are partitioned — they read the seed directly and stamp `snapshot_date` onto every row per partition, cascading via AutomationCondition. |
-| **Cross-location asset sensor** | `elt_to_ml_bridge_sensor` (ml_pipelines) — listens for new partitions of `reporting.rpt_sales_summary_by_customer` in the elt_pipelines code location and fires `ml_training_job` with the same `partition_key`. |
-| **ML fan-out** | `customer_segments` (KMeans) + `churn_predictions` (LogisticRegression) both consume `customer_rfm` within a single partition. |
-| **Freshness** | Every partitioned asset carries a `FreshnessPolicy.cron(deadline_cron=..., lower_bound_delta=...)` — attached to `@asset(...)` for Python assets or via the dbt translator's `get_freshness_policy()` override. Evaluated automatically by Dagster's automation infrastructure; no separate sensor to toggle on. Open any asset → **Checks** tab → you'll see `freshness_check` with PASS / WARN / FAIL. Policies live in `elt_pipelines/constants.py` and `ml_pipelines/constants.py`, plus the translator methods in each `assets/dbt.py`. |
-
----
-
-## Sensor-driven orchestration — one layer at a time
-
-The project is **entirely sensor-driven** now that every layer is partitioned. Sensors form a cascade, each one bridging a different hop in the graph:
-
-| Hop | Sensor | What it does |
-|---|---|---|
-| Filesystem → landing assets | `landing_file_sensor` | Detects new `<prefix>_YYYY_MM_DD.csv` / `prd_info_YYYY_MM.csv` files, emits one `RunRequest` per file with the right `partition_key` + job. |
-| landing (Python daily) → staging (daily-fed stg) | `AutomationCondition.eager()` (via `elt_automation_condition_sensor`) | Staging models fed directly by daily `raw/*` (`stg_crm_cust_info`, `stg_crm_sales_details`, `stg_erp_LOC_A101`) auto-fire per partition when their upstream materializes. |
-| landing (seeds) → staging (seed-derived stg) | `cross_partition_sensor` **Pass-0** | Staging models whose ONLY upstream is an unpartitioned seed (`stg_erp_CUST_AZ12`, `stg_erp_PX_CAT_G1V2`) can't be driven by AC — the seed has no time-partition for `any_deps_updated()` to fire on. Pass-0 fires them for every daily partition where a sibling daily `raw/*` is materialized. |
-| landing (monthly Python) → staging (slow-cadence stg) | `cross_partition_sensor` **Pass-1** | `stg_crm_prd_info` is daily-partitioned but its only upstream (`raw/raw_prd_info_monthly`) is monthly. Native `eager()` never fires the daily stg for days that have no same-day monthly partition — `any_deps_missing()` stays TRUE and the daily child is never synthesized from a sparse parent. Pass-1 provides the missing semantic: fire `stg_crm_prd_info` once per new monthly source partition (keyed to the month-start daily partition). |
-| mart / cross-cadence bridge | `cross_partition_sensor` **Pass-2** (for `dim_products_history`) | The first mart that joins a daily dimension (`stg_erp_PX_CAT_G1V2`) with a slow-cadence dimension (`stg_crm_prd_info`). Tagged `latest_available`. The sensor fires it daily in expansion mode using the intersection of exact-match deps — the daily pipeline keeps producing rows using the latest-available monthly snapshot. The SQL inside uses a `MAX(snapshot_date) <= var.snapshot_dt` CTE to pick the in-effect monthly snapshot and stamps the current daily partition. |
-| mart / reporting (downstream of the bridge) | `AutomationCondition.eager()` | `dim_products`, `fct_sales`, `rpt_*` all auto-cascade once `dim_products_history` materializes for a partition. |
-| elt → ml (cross-code-location) | `elt_to_ml_bridge_sensor` (ml_pipelines) | Listens for new partitions of `reporting.rpt_sales_summary_by_customer`, fires `ml_training_job` with the same `partition_key`. Turn it **off** to stop the ml chain while elt keeps running. |
-
-Each sensor is independently togglable. Turn off the ml bridge to stop the ml chain from auto-firing while elt keeps running. Turn off the AC sensor to stop the cascade while landing keeps ingesting. That's the "layered sensor" pattern: every boundary between responsibilities is an explicit, disablable gate.
-
----
-
-## Freshness — how stale is each asset?
-
-Every partitioned asset in this project carries a `FreshnessPolicy.cron(...)`. This is pure metadata on the asset — NOT an asset check, NOT a step in any job. Dagster's automation infrastructure evaluates the policy on its regular tick (driven by `default_automation_condition_sensor`) and surfaces the result on the asset's **Checks** tab.
-
-Because `FreshnessPolicy` is not a check step, **no materialization job includes a freshness step in its execution plan**. Runs are always clean green when the materialization succeeds; freshness is evaluated and surfaced independently.
-
-**How it's attached:**
-
-- Python assets — `@asset(freshness_policy=FRESHNESS_LANDING_DAILY | FRESHNESS_LANDING_MONTHLY | FRESHNESS_ML_DAILY)`.
-- dbt models — via `get_freshness_policy()` on the custom `DagsterDbtTranslator` (no per-model YAML config needed; the translator assigns per-layer policies centrally).
-
-**Where to look in the UI:** with `default_automation_condition_sensor` on, open any partitioned asset → **Checks** tab → `freshness_check` row with one of:
-
-- ✅ **PASS** — the expected partition has been materialized before its deadline.
-- ⚠️ **WARN** — partition is approaching the deadline.
-- ❌ **FAIL** — partition is overdue.
-
-**Per-layer deadlines (cron-based):**
-
-| Layer | Deadline |
-|---|---|
-| `raw_sales_details`, `raw_cust_info`, `raw_loc_a101` (daily Python landings) | 9am every day |
-| `raw_prd_info_monthly` (monthly Python landing) | 9am on the 2nd of each month |
-| `staging/*`, `mart/*`, `reporting/*` (dbt) | 10am every day |
-| `ml_features/*` (dbt + Python) | 11am every day |
-
-**Policies live in:**
-- `code_locations/elt_pipelines/elt_pipelines/constants.py` — `FRESHNESS_LANDING_DAILY`, `FRESHNESS_LANDING_MONTHLY`
-- `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py` — `_FRESHNESS_LANDING`, `_FRESHNESS_ELT` + the translator's `get_freshness_policy`
-- `code_locations/ml_pipelines/ml_pipelines/constants.py` — `FRESHNESS_ML_DAILY`
-- `code_locations/ml_pipelines/ml_pipelines/assets/dbt.py` — translator's `get_freshness_policy`
-
-Tune them up or down to match what "fresh enough" means for your pipeline. No sensor to toggle on — as long as `default_automation_condition_sensor` is running, freshness is evaluated.
-
----
-
-## Why these architectural choices
-
-- **SQLite for Dagster metadata** — zero config, file-based, perfect for a local demo. Production would be Postgres.
-- **One shared DuckDB file** mounted into both code-location containers. Lets `ml_pipelines` read the elt marts that `elt_pipelines` wrote. DuckDB permits only one writer at a time, so we serialize writes via `QueuedRunCoordinator` + `tag_concurrency_limits` on the `duckdb_writer` key.
-- **One dbt project** at repo root. Each code location loads a different selector (elt takes everything except `ml_features`; ml takes only `ml_features`). Groups (`elt_team`, `ml_team`) + `+access:` settings enforce boundaries at the dbt layer.
-- **`@dbt_assets` per code location** — not `load_assets_from_dbt_project`. The manifest is produced inside each container at startup with a per-container `--target-path` so the two containers don't race on the same `target/` folder.
-- **Daily partitioning everywhere** — every dbt model is `materialized='incremental'` with `unique_key='snapshot_date'` and `incremental_strategy='delete+insert'`. Dagster reads `context.partition_time_window.start` and passes the partition date into dbt as `--vars '{"snapshot_dt":"YYYY-MM-DD"}'`. Each model then filters its own upstreams by that var. This is the pattern used in production Dagster/dbt projects (see the reference implementation at `imp_finance_mart`) — each partition holds the state of the world for that one day, and re-running a partition replaces only its own rows.
-- **Split `@dbt_assets` blocks** — the partitioned block contains all of staging + mart + reporting. The seed-only block contains just the two dbt seeds (CUST_AZ12, PX_CAT_G1V2), materialized once via `dbt_seed_job`. There is no separate "dbt landing" layer — the Python-owned `raw/*` assets ARE the landing, and dbt sources in `models/sources.yml` declare `meta.dagster.asset_key` so each source collapses onto its matching Python landing AssetKey. Staging reads the source directly.
-- **Slow-cadence source → daily pipeline** — the monthly product source carries its cadence into dbt via `stg_crm_prd_info` (tagged `latest_available_source`). The first mart that bridges it into the daily grain is `dim_products_history` (tagged `latest_available`), which joins the slow-cadence stg with a daily seed-derived dim (`stg_erp_PX_CAT_G1V2`). `cross_partition_sensor` fires `dim_products_history` daily in expansion mode so the daily pipeline keeps producing new mart rows even while the monthly source hasn't updated. Concretely: day 1 through day N of a given month all use that month's single monthly product snapshot; when a new month's monthly file lands, subsequent daily partitions pick it up automatically.
-- **dbt_utils for compound uniqueness tests** — since every natural key (customer_id, product_id, …) appears once per partition, `(natural_key, snapshot_date)` is the real uniqueness constraint. We use `dbt_utils.unique_combination_of_columns` for that instead of plain `unique`. Tests surface in the Dagster UI as asset checks.
-- **Intentional WARN test — `not_null_dim_customers_customer_id`** — the upstream CRM data (from `sant3e/dbt_snowflake_dwh_project`) has a few rows with NULL `cst_id`. The test on `mart/dim_customers.customer_id` is configured with `severity: warn` so it surfaces the issue on the Checks tab without blocking the run or any downstream assets. Open `mart/dim_customers` → Checks tab → you'll see `not_null_dim_customers_customer_id` with a yellow WARN badge. This demonstrates the test-as-observability pattern: known data quality signals flow visibly, the pipeline keeps moving.
-- **ML assets partitioned too** — `customer_segments` and `churn_predictions` are daily assets with the same `delete+insert` semantics as the dbt side. The joblib artifact file is partition-stamped (`churn_model_YYYY-MM-DD.joblib`) so you can see a fresh artifact per partition without overwriting yesterday's.
-
----
-
-## Adding a new code location
-
-1. `cp -r code_locations/ml_pipelines code_locations/<new_name>` and rename the package + `[tool.dagster]` fields in its `pyproject.toml`.
-2. Add a new `grpc_server` entry to `dagster_home/workspace.yaml`.
-3. Add a new service to `docker-compose.yml` (copy the `ml_pipelines` service, change the `CODE_LOCATION` build arg + container name).
-4. `make build && make down && make up`.
-
----
-
-## Troubleshooting
-
-- **"Code location failed to load"** — Check `docker compose logs <location>` for import errors. Most common cause: a stale `manifest.json`. Restart the offending container or rebuild (`make build`).
-- **"database is locked"** — Another process holds a DuckDB writer. Check `make ps`; confirm only one writer asset runs at a time (the `duckdb_writer` concurrency key should prevent this). For interactive queries use `duckdb -readonly`.
-- **Sensor not firing** — From the UI, confirm the sensor is toggled on (they are all OFF by default for local dev).
-- **Freshness stuck / not updating** — Freshness is implemented via `FreshnessPolicy` attached to assets (not as a separate check step). Make sure `default_automation_condition_sensor` is on — that's what evaluates freshness and surfaces PASS/WARN/FAIL on the Checks tab. There is no separate freshness sensor to toggle.
-- **Monthly partition rejected** — `MonthlyPartitionsDefinition` uses `end_offset=1` so the current month is valid; if you change `start_date`, make sure your file's month is within the supported range.
-- **"dbt found N package(s) specified in packages.yml, but only 0 package(s) installed in dbt_packages"** — happens right after `reset-demo` because that script wipes `dbt_packages/`. The code-location containers run `dbt deps` on startup if `dbt_packages/dbt_utils/` is missing; give it a few seconds and it self-heals. If it persists, `make down && make up` forces a fresh startup sequence.
-- **"Binder Error: Cannot compare values of type VARCHAR and type DATE"** — means a Dagster-landed raw table has `snapshot_date` as VARCHAR but the dbt model is comparing it to a DATE. Every staging dbt model does `snapshot_date::DATE AS snapshot_date` in the SELECT and `snapshot_date::DATE = '{{ var(...) }}'::DATE` in the WHERE; if you add a new source or staging model, follow that pattern.
-- **Backfill produces a run per partition but they all queue** — expected: `duckdb_writer` concurrency limit is 1 so runs serialize. Backfills of many partitions take time linearly; switch to a real warehouse to parallelize.
-- **Fresh slate** — `make reset-demo` stops the stack and returns the repo to a just-cloned state (see "Keeping the repo clean for the next person"). For a lighter wipe that keeps landing files, use `make wipe`.
-- **`AutomationCondition.eager()` 7-day lookback window** — in `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py`. The `rebase_day1_csvs.sh` script + the Faker generator's `--relative-to-today` mode keep all three demo partitions inside this window. If you generate partitions further back than 7 days, either rebase day-1 closer to those dates, or widen `timedelta(days=7)` in `get_automation_condition`.
-
----
-
 ## Keeping the repo clean for the next person
 
 Running the demo creates files the repo doesn't ship with — a DuckDB warehouse, a joblib ML artifact, Dagster's SQLite storage, any CSVs you dropped into `data/landing/` during the demo, and anything you generated into `future_landing_data/`.
@@ -346,96 +235,75 @@ This stops the stack, wipes the DuckDB warehouse + Dagster SQLite + dbt artifact
 
 ## What this demo simulates (vs real-world)
 
-The Dagster patterns in this repo (code locations, partitioned assets, sensors, `@dbt_assets` with `--vars` partition plumbing, incremental `delete+insert` models, asset checks + freshness) are the **real thing** — they'd work unchanged in production. But the **data source and the landing layer are stand-ins** for real infrastructure. If you're using this demo to learn Dagster, it's worth being explicit about what's real and what's simulated.
+The Dagster and dbt pieces are **production-shaped**. Only the infrastructure underneath them is local-first. If you adapt this to production, three things change:
 
-### Real-world flow
-
-In a production setup, daily snapshots come from an **actual ingestion pipeline** that lands rows into a **real warehouse** (Snowflake, BigQuery, etc.). Dagster watches the warehouse, not a filesystem folder.
-
-```
-[source system]
-     │ (extract via Airbyte / Fivetran / custom script)
-     ▼
-[landing area in a real warehouse — Snowflake/BigQuery/S3/GCS]
-  e.g. LANDING.RAW_SALES_DETAILS with a snapshot_date column,
-       appended daily by the ingestion pipeline
-     │
-     ▼
-[Dagster sensor monitoring the landing area]
-  - Snowflake partition sensor, GCS/S3 object sensor,
-    or custom table-growth sensor
-  - On detecting new data, fires a partitioned run for that day
-     │
-     ▼
-[dbt models reading from LANDING via source(), filtering by
- snapshot_date = '{{ var("snapshot_dt") }}' passed in by Dagster]
-     │
-     ▼
-[staging → mart → reporting — each incremental, delete+insert on the
- current partition, one row-set per snapshot_date]
-     │
-     ▼
-[cross-location bridge sensor fires the ML training job for the same
- partition once reporting is ready]
-```
-
-Seeds, meanwhile, are genuinely static reference data — you drop a new CSV into `seeds/` and run `dbt seed` when the reference table needs refreshing. No sensor, no cadence.
-
-### How this demo implements it
-
-We replace three real components with cheaper stand-ins so the whole thing runs on your laptop:
-
-```
-[no source system — we fake it with a Faker-based generator]
-     │
-     ▼
-[./data/landing/ folder on the host, bind-mounted into containers]
-  = pretending to be the landing area
-     │
-     ▼
-[landing_file_sensor watches the folder via os.listdir()]
-  = pretending to be a warehouse partition sensor
-     │
-     ▼
-[Dagster landing assets read the CSVs and write to DuckDB raw.* tables
- with a snapshot_date column carrying the partition key]
-  = pretending to be the "ingestion finished, it's in LANDING now" state
-     │
-     ▼
-[dbt reads from raw.* via source('dagster_raw', ...) and filters by
- snapshot_date = '{{ var("snapshot_dt") }}' (Dagster passes --vars)]
-     │
-     ▼
-[staging → mart → reporting — same partition model as real world]
-     │
-     ▼
-[elt_to_ml_bridge_sensor fires ml_training_job for the same partition]
-```
-
-### What's simulated vs real
-
-| Real world | Demo stand-in |
+| What the demo does | What production would do |
 |---|---|
-| External source system | Faker-based generator (`scripts/generate_future_landing_data.py`) |
-| Ingestion pipeline (Airbyte / Fivetran / custom) | A plain `cp` command copying CSVs into `data/landing/` |
-| Landing warehouse table (Snowflake, BigQuery, …) | `./data/landing/*.csv` files on disk |
-| Sensor polling warehouse for new partitions | `landing_file_sensor` polling the folder |
-| Snowflake / BigQuery warehouse | Single DuckDB file at `./warehouse/oss_template.duckdb` |
+| Faker generator drops CSVs into `data/landing/` | A real ingestion pipeline (Airbyte / Fivetran / custom) lands rows in a warehouse table |
+| `landing_file_sensor` watches the folder via `os.listdir()` | A Snowflake partition sensor, S3/GCS object sensor, or custom warehouse sensor |
+| DuckDB file at `./warehouse/oss_template.duckdb` | Snowflake / BigQuery |
 
-**What stays identical to production:**
-- Every Dagster pattern (code locations, partitioned assets, sensors, partitioned jobs, asset checks, freshness checks).
-- Daily `delete+insert` incremental dbt models with `snapshot_date` as the partition watermark — exactly how a real Snowflake/BigQuery ELT is structured.
-- The `--vars snapshot_dt` plumbing: Dagster reads `context.partition_time_window.start` and hands it to dbt; every model filters on `{{ var("snapshot_dt") }}`.
-- The latest-available-on-or-before pattern for monthly-into-daily joins (in `stg_crm_prd_info`'s SQL filter).
-- Cadence-bridging via tag-driven `cross_partition_sensor`: `stg_crm_prd_info` tagged `latest_available_source`, `dim_products_history` tagged `latest_available`. Mirrors how `imp_finance_mart` coordinates daily marts against slow-cadence staging models.
-- The dbt project structure and group-based access boundaries.
+Everything downstream of the sensor is unchanged: partitioned assets, `@dbt_assets` with `--vars snapshot_dt` plumbing, incremental `delete+insert` models keyed on `snapshot_date`, the latest-available-on-or-before pattern for monthly-into-daily joins, tag-driven `cross_partition_sensor`, freshness policies, asset checks, and the cross-location ML bridge. The SQL was ported FROM Snowflake TO DuckDB, so the reverse port is minimal.
 
-**What you'd swap for production:**
-- Replace `landing_file_sensor` with whatever sensor suits your source (a Snowflake partition sensor, an S3 object sensor, etc.). Everything downstream of the sensor stays the same.
-- Replace DuckDB with your production warehouse. All dbt SQL would need minimal adjustment for vendor-specific functions (this project's SQL was ported FROM Snowflake TO DuckDB, so the reverse is small).
-- Replace the `cp` step with a real ingestion tool.
+---
 
-The point: the Dagster and dbt pieces are production-shaped; only the infrastructure underneath them is local-first.
+## Orchestration at a glance
+
+The graph is entirely sensor-driven. Four mechanisms cover the whole pipeline, each an independently-togglable gate on a specific hop:
+
+| Hop | Mechanism | Why |
+|---|---|---|
+| Filesystem → landing assets | `landing_file_sensor` | Stand-in for a warehouse partition/object sensor — one sensor routes both daily `<prefix>_YYYY_MM_DD.csv` and monthly `prd_info_YYYY_MM.csv` files to the right job with the right `partition_key`. |
+| landing → daily staging → mart → reporting | `AutomationCondition.eager()` | Handles the common case: a daily parent materializing fires its daily children per partition. Rule is `missing_in_window \| code_version_change \| eager_with_lookback` with a 7-day lookback, which bypasses the `since_last_handled()` cold-start trap. |
+| Seed-only staging, monthly→daily bridge, mart bridge | `cross_partition_sensor` (Pass-0/1/2) | Covers the three cases `eager()` can't: seed-only stg (no partitioned upstream to fire on), `stg_crm_prd_info` (sparse monthly parent — `any_deps_missing()` stays TRUE, native eager never synthesizes the daily child), and `dim_products_history` (daily mart that must fire even when the monthly dim hasn't updated). Tag-driven: `latest_available_source` + `latest_available`. |
+| reporting → ml (cross-code-location) | `elt_to_ml_bridge_sensor` | Lives in `ml_pipelines`, listens for new partitions of `reporting.rpt_sales_summary_by_customer` (in `elt_pipelines`), and fires `ml_training_job` with the same `partition_key`. Turn off to pause ml while elt keeps running. |
+
+**Where to see it in the UI:** **Deployment** tab for the two code locations · **Automation → Sensors** for every sensor above · any asset's partition grid for per-day status · any asset's **Checks** tab for dbt tests (including `dbt_utils.unique_combination_of_columns`) and freshness · **Jobs → `dbt_seed_job`** to load the unpartitioned reference tables · **Backfill** on any partitioned asset (runs serialize via the `duckdb_writer` tag concurrency key; each partition becomes its own run via `BackfillPolicy.multi_run()`).
+
+**ML fan-out:** `customer_rfm` feeds both `customer_segments` (KMeans) and `churn_predictions` (LogisticRegression), all within a single daily partition.
+
+---
+
+## Freshness
+
+A `FreshnessPolicy.cron(...)` declares each asset's expected cadence as metadata on the asset itself — turning "this table should be updated by 10am every day" into a contract Dagster continuously evaluates, instead of an assumption you'd only discover was violated when a downstream consumer complains. It solves the silent-staleness problem: a materialization job succeeded, no alert fired, but the table is hours behind what consumers expect.
+
+The policy is NOT an asset check and NOT a step in any materialization plan — runs stay green when the materialization succeeds, and freshness is evaluated separately by the automation infrastructure that `default_automation_condition_sensor` drives. Failures surface as PASS / WARN / FAIL on the asset's **Checks** tab and as asset-health state on the asset graph, so staleness becomes visible the moment it happens.
+
+**Per-layer deadlines in this project:**
+
+| Layer | Deadline |
+|---|---|
+| Daily Python landings (`raw_sales_details`, `raw_cust_info`, `raw_loc_a101`) | 9am every day |
+| Monthly Python landing (`raw_prd_info_monthly`) | 9am on the 2nd of each month |
+| `staging/*`, `mart/*`, `reporting/*` (dbt) | 10am every day |
+| `ml_features/*` | 11am every day |
+
+Policies live in `{elt,ml}_pipelines/constants.py` and the dbt translator's `get_freshness_policy()` in each `assets/dbt.py`. Tune them to match what "fresh enough" means for your pipeline.
+
+---
+
+## Why these architectural choices
+
+- **SQLite for Dagster metadata** — zero config, file-based. Production would be Postgres.
+- **One shared DuckDB file** mounted into both code-location containers so `ml_pipelines` can read elt marts. DuckDB allows one writer at a time, so writes serialize via `QueuedRunCoordinator` + the `duckdb_writer` tag concurrency limit.
+- **One dbt project, two selectors** — elt takes everything except `ml_features`; ml takes only `ml_features`. Groups (`elt_team`, `ml_team`) + `+access:` enforce ownership boundaries at the dbt layer.
+- **`@dbt_assets` per code location**, not `load_assets_from_dbt_project`. Each container builds its own manifest with a per-container `--target-path` so the two don't race on `target/`.
+- **Daily partitioning everywhere** — every dbt model is `incremental` + `delete+insert` on `snapshot_date`. Dagster passes `--vars '{"snapshot_dt":"YYYY-MM-DD"}'`; each model filters itself on that var, so re-running a partition replaces only its rows.
+- **Split `@dbt_assets` blocks** — one partitioned block for staging/mart/reporting, one seed-only block for `dbt_seed_job`. There's no separate "dbt landing" layer: the Python `raw/*` assets ARE the landing, and `models/sources.yml` declares `meta.dagster.asset_key` so each dbt source collapses onto its matching Python AssetKey.
+- **Slow-cadence source → daily pipeline** — `stg_crm_prd_info` (tagged `latest_available_source`) carries the monthly cadence forward; `dim_products_history` (tagged `latest_available`) bridges it into the daily grain via `cross_partition_sensor`. Day 1…N of a month use the same monthly snapshot; a new monthly file flips subsequent partitions automatically.
+- **`dbt_utils` for compound uniqueness** — `(natural_key, snapshot_date)` is the real constraint (natural keys repeat across partitions), so we use `dbt_utils.unique_combination_of_columns` instead of plain `unique`. Tests surface as asset checks.
+- **Intentional WARN test** — `not_null_dim_customers_customer_id` is `severity: warn` because the upstream CRM has a few NULL `cst_id` rows. Shows the test-as-observability pattern: known data quality signals are visible, the pipeline keeps moving.
+- **Partitioned ML assets** — `customer_segments` + `churn_predictions` use the same `delete+insert` semantics as dbt. The joblib artifact is partition-stamped (`churn_model_YYYY-MM-DD.joblib`) so yesterday's model isn't overwritten.
+
+---
+
+## Adding a new code location
+
+1. `cp -r code_locations/ml_pipelines code_locations/<new_name>` and rename the package + `[tool.dagster]` fields in its `pyproject.toml`.
+2. Add a new `grpc_server` entry to `dagster_home/workspace.yaml`.
+3. Add a new service to `docker-compose.yml` (copy the `ml_pipelines` service, change the `CODE_LOCATION` build arg + container name).
+4. `make build && make down && make up`.
 
 ---
 
@@ -446,3 +314,18 @@ The point: the Dagster and dbt pieces are production-shaped; only the infrastruc
 - No Postgres, no Dagster+, no k8s, no branch deployments, no Snowflake.
 - No production retry/alerting policies — add your own when adapting.
 - No CI — this is a teaching artifact.
+
+---
+
+## Troubleshooting
+
+- **"Code location failed to load"** — Check `docker compose logs <location>` for import errors. Most common cause: a stale `manifest.json`. Restart the offending container or rebuild (`make build`).
+- **"database is locked"** — Another process holds a DuckDB writer. Check `make ps`; confirm only one writer asset runs at a time (the `duckdb_writer` concurrency key should prevent this). For interactive queries use `duckdb -readonly`.
+- **Sensor not firing** — From the UI, confirm the sensor is toggled on (they are all OFF by default for local dev).
+- **Freshness stuck / not updating** — Freshness is implemented via `FreshnessPolicy` attached to assets (not as a separate check step). Make sure `default_automation_condition_sensor` is on — that's what evaluates freshness and surfaces PASS/WARN/FAIL on the Checks tab. There is no separate freshness sensor to toggle.
+- **Monthly partition rejected** — `MonthlyPartitionsDefinition` uses `end_offset=1` so the current month is valid; if you change `start_date`, make sure your file's month is within the supported range.
+- **"dbt found N package(s) specified in packages.yml, but only 0 package(s) installed in dbt_packages"** — happens right after `reset-demo` because that script wipes `dbt_packages/`. The code-location containers run `dbt deps` on startup if `dbt_packages/dbt_utils/` is missing; give it a few seconds and it self-heals. If it persists, `make down && make up` forces a fresh startup sequence.
+- **"Binder Error: Cannot compare values of type VARCHAR and type DATE"** — means a Dagster-landed raw table has `snapshot_date` as VARCHAR but the dbt model is comparing it to a DATE. Every staging dbt model does `snapshot_date::DATE AS snapshot_date` in the SELECT and `snapshot_date::DATE = '{{ var(...) }}'::DATE` in the WHERE; if you add a new source or staging model, follow that pattern.
+- **Backfill produces a run per partition but they all queue** — expected: `duckdb_writer` concurrency limit is 1 so runs serialize. Backfills of many partitions take time linearly; switch to a real warehouse to parallelize.
+- **Fresh slate** — `make reset-demo` stops the stack and returns the repo to a just-cloned state (see "Keeping the repo clean for the next person"). For a lighter wipe that keeps landing files, use `make wipe`.
+- **`AutomationCondition.eager()` 7-day lookback window** — in `code_locations/elt_pipelines/elt_pipelines/assets/dbt.py`. The `rebase_day1_csvs.sh` script + the Faker generator's `--relative-to-today` mode keep all three demo partitions inside this window. If you generate partitions further back than 7 days, either rebase day-1 closer to those dates, or widen `timedelta(days=7)` in `get_automation_condition`.
